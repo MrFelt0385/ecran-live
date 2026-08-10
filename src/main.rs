@@ -503,15 +503,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 global_png.len() as f64 / 1048576.0
             );
 
-            // 1. OCR + matching flou (fonction commune)
-            if let Some((text, x, y)) = find_text_ocr(&global_png, &target) {
+            // 1. OCR + matching flou (meilleur match, centre du bbox)
+            if let Some((text, x, y, score)) = find_text_ocr_best(&global_png, &target) {
                 let scale = cap.scale_to_display(ocr_w);
                 println!(
-                    "🎯 TROUVÉ « {} » en OCR pur à ({:.0}, {:.0})",
-                    text, x, y
+                    "🎯 TROUVÉ « {} » en OCR pur à ({:.0}, {:.0}) [score {}/2]",
+                    text, x, y, score
                 );
                 println!("↔️ Remap ×{:.2} → écran réel ({:.0}, {:.0})", scale, x * scale, y * scale);
-                println!("LARGEUR_ECRAN {}", cap.display_w);
+                println!("LARGEUR_ECRAN {}\n", cap.display_w);
                 return Ok(());
             }
             println!("[OCR n'a pas trouvé « {} » — tentative vision]", target);
@@ -563,31 +563,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ocr_w, h, cap.display_w
             );
 
-            if let Some((text, cx, cy)) = find_text_ocr(&global_png, &target) {
+            if let Some((text, cx, cy, score)) = find_text_ocr_best(&global_png, &target) {
                 let scale = cap.scale_to_display(ocr_w);
                 let real_x = cx * scale;
                 let real_y = cy * scale;
                 println!(
-                    "🎯 TROUVÉ « {} » en capture ({:.0}, {:.0})",
-                    text, cx, cy
+                    "🎯 TROUVÉ « {} » au centre ({:.0}, {:.0}) [score {}/2]",
+                    text, cx, cy, score
                 );
                 println!(
                     "↔️ Remap ×{:.2} → écran réel ({:.0}, {:.0})",
                     scale, real_x, real_y
                 );
-                let real_y_center = real_y + 10.0 * scale;
+                // find_text_ocr_best retourne déjà le CENTRE du bounding box →
+                // pas d'offset arbitraire (leçon computer-use : viser le centre).
                 if right {
-                    right_click_at(real_x, real_y_center)?;
+                    right_click_at(real_x, real_y)?;
                     println!("✅ Clic droit effectué sur « {} »", target);
                 } else if dbl {
-                    double_click_at(real_x, real_y_center)?;
+                    double_click_at(real_x, real_y)?;
                     println!("✅ Double-clic effectué sur « {} »", target);
                 } else {
-                    click_at(real_x, real_y_center)?;
+                    click_at(real_x, real_y)?;
                     println!("✅ Clic effectué sur « {} »", target);
                 }
             } else {
                 println!("❌ « {} » introuvable à l'écran", target);
+            }
+        }
+        "--marker" => {
+            // Test isolé du marqueur visuel : affiche un carré rose à (x, y)
+            // pendant `ms` ms. Usage: ecran-live --marker <x> <y> [ms]
+            let x: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(800.0);
+            let y: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(450.0);
+            let ms: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1500);
+            println!("🎨 Marqueur à ({:.0}, {:.0}) pendant {}ms", x, y, ms);
+            show_marker(x, y, ms);
+        }
+        "--clickxy" => {
+            // Clic par COORDONNÉES directes (écran réel) — le chaînon manquant :
+            // nos YEUX (OCR) trouvent le texte, puis on clique exactement là.
+            // Usage: ecran-live --clickxy <x> <y>
+            let x: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(800.0);
+            let y: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(450.0);
+            println!("🎯 Clic direct à ({:.0}, {:.0}) — nos yeux ont trouvé, nous cliquons", x, y);
+            click_at(x, y)?;
+        }
+        "--axclick" => {
+            // Clic via l'AX tree (leçon computer-use/cua-driver) : trouve
+            // l'élément par son label même s'il est VIDE (un champ de saisie
+            // n'a pas de texte OCR !), calcule le centre via AXPosition+AXSize,
+            // puis clique par CGEvent (Tier 3 — fiable sur Safari, contrairement
+            // à AXPress qui ment sur les vues web).
+            // Usage: ecran-live --axclick Safari "Description"
+            let app = args.get(1).cloned().unwrap_or_else(|| "Safari".to_string());
+            let target = args.get(2).cloned().unwrap_or_default();
+            if target.is_empty() {
+                println!("Usage: ecran-live --axclick <APP> \"label\"");
+                return Ok(());
+            }
+            match ax_find_element(&app, &target) {
+                Some((label, cx, cy)) => {
+                    println!("🔍 AX: « {} » au centre ({:.0}, {:.0})", label, cx, cy);
+                    click_at(cx, cy)?;
+                    println!("✅ Clic AX effectué sur « {} »", target);
+                }
+                None => {
+                    // Notre binaire n'a pas la permission Accessibilité (TCC) —
+                    // on délègue à cua-driver qui l'a (le PONT).
+                    println!("🔌 AX direct indisponible — pont vers cua-driver...");
+                    match cua_find_and_click(&app, &target) {
+                        Some(_) => println!("✅ Clic via cua réussi"),
+                        None => println!("❌ Élément « {} » introuvable (AX + cua)", target),
+                    }
+                }
             }
         }
         "--scroll" => {
@@ -606,15 +655,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let h = (ocr_w as f64 * cap.ratio).round() as u32;
             let global_png = cap.capture_bytes(ocr_w, h)?;
 
-            if let Some((text, cx, cy)) = find_text_ocr(&global_png, &target) {
+            if let Some((text, cx, cy, score)) = find_text_ocr_best(&global_png, &target) {
                 let scale = cap.scale_to_display(ocr_w);
                 let real_x = cx * scale;
                 let real_y = cy * scale;
                 println!(
-                    "🎯 TROUVÉ « {} » → remap ×{:.2} → ({:.0}, {:.0})",
-                    text, scale, real_x, real_y
+                    "🎯 TROUVÉ « {} » au centre → remap ×{:.2} → ({:.0}, {:.0}) [score {}/2]",
+                    text, scale, real_x, real_y, score
                 );
-                scroll_at(real_x, real_y + 10.0 * scale, lines)?;
+                scroll_at(real_x, real_y, lines)?;
             } else {
                 println!("❌ « {} » introuvable à l'écran", target);
             }
@@ -642,6 +691,114 @@ fn global_prompt(full_w: u32, full_h: u32, small_w: u32) -> String {
          si tu indiques des coordonnées, multiplie-les par {:.2} pour obtenir les pixels réels de l'écran.",
         full_w, full_h, small_w, scale, scale
     )
+}
+
+/// Cherche TOUTES les correspondances OCR du texte cible et retourne la
+/// MEILLEURE (distance Levenshtein minimale). Retourne (texte, x, y, score).
+/// Le score est la distance Levenshtein minimale trouvée (0 = exact).
+/// Contrairement à l'ancienne version qui retournait le premier match,
+/// on trie par score pour éviter les faux positifs (ex: « Repository »
+/// qui matchait « New repositon » dans la sidebar avant le champ visé).
+fn find_text_ocr_best(png_bytes: &[u8], target: &str) -> Option<(String, f64, f64, usize)> {
+    let tmp = std::env::temp_dir().join("ecran-live-ocr.png");
+    std::fs::write(&tmp, png_bytes).ok()?;
+    let out = std::process::Command::new("ocrs")
+        .arg("--json")
+        .arg(&tmp)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let paras = v["paragraphs"].as_array()?;
+    let mut best: Option<(String, f64, f64, usize)> = None;
+    for p in paras {
+        let ls = p["lines"].as_array()?;
+        for l in ls {
+            let text = l["text"].as_str().unwrap_or("").to_string();
+            if let Some(score) = fuzzy_score(&text, target) {
+                // Garder le meilleur (distance minimale)
+                let replace = match &best {
+                    None => true,
+                    Some((_, _, _, best_score)) => score < *best_score,
+                };
+                if replace {
+                    // Centre du bounding box (vertices: coin sup-gauche, sup-droit,
+                    // inf-droit, inf-gauche) — plus fiable que le coin seul.
+                    let mut xs = Vec::new();
+                    let mut ys = Vec::new();
+                    if let Some(vs) = l["vertices"].as_array() {
+                        for vtx in vs.iter() {
+                            if let (Some(x), Some(y)) = (
+                                vtx[0].as_f64(),
+                                vtx[1].as_f64(),
+                            ) {
+                                xs.push(x);
+                                ys.push(y);
+                            }
+                        }
+                    }
+                    if !xs.is_empty() && !ys.is_empty() {
+                        let cx = xs.iter().sum::<f64>() / xs.len() as f64;
+                        let cy = ys.iter().sum::<f64>() / ys.len() as f64;
+                        best = Some((text, cx, cy, score));
+                    }
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Retourne la distance Levenshtein minimale entre la cible et un mot du
+/// texte (None si aucune correspondance). La tolérance est RELATIVE :
+/// 1 faute pour les mots courts (3-6), 2 pour les mots longs (7+).
+/// Beaucoup plus fiable que la distance fixe ≤ 2 qui créait des faux positifs.
+fn fuzzy_score(text: &str, target: &str) -> Option<usize> {
+    let t = target.to_lowercase();
+    let tl = t.len();
+    if t.is_empty() || tl < 3 {
+        // Cible trop courte : recherche par simple inclusion
+        return if text.to_lowercase().contains(&t) {
+            Some(0)
+        } else {
+            None
+        };
+    }
+    let max_dist = if tl >= 7 { 2 } else { 1 };
+    let mut best: Option<usize> = None;
+    for w in text
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+    {
+        if w.is_empty() {
+            continue;
+        }
+        let wl = w.len();
+        // La longueur doit être proche de la cible (±2), sinon ce n'est pas le mot
+        if wl < tl.saturating_sub(2) || wl > tl + 2 {
+            continue;
+        }
+        let d = levenshtein(w, &t);
+        if d <= max_dist {
+            let better = match best {
+                None => true,
+                Some(b) => d < b,
+            };
+            if better {
+                best = Some(d);
+            }
+        }
+    }
+    best
+}
+
+/// Compat : ancien appel booléen (utilisé par --locate et --click).
+fn fuzzy_match(text: &str, target: &str) -> bool {
+    fuzzy_score(text, target).is_some()
 }
 
 /// Coordinate Priming (GUI-Lens) : lance ocrs sur le PNG et retourne les
@@ -685,38 +842,6 @@ fn ocr_texts(png_bytes: &[u8]) -> String {
     lines.join("\n")
 }
 
-/// Grounding par OCR : lance ocrs sur le PNG et cherche le premier texte qui
-/// matche (fuzzy, distance ≤ 2) la cible. Retourne (texte trouvé, x, y) en
-/// coordonnées de la capture, ou None si introuvable.
-fn find_text_ocr(png_bytes: &[u8], target: &str) -> Option<(String, f64, f64)> {
-    let tmp = std::env::temp_dir().join("ecran-live-ocr.png");
-    std::fs::write(&tmp, png_bytes).ok()?;
-    let out = std::process::Command::new("ocrs")
-        .arg("--json")
-        .arg(&tmp)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    let paras = v["paragraphs"].as_array()?;
-    for p in paras {
-        let ls = p["lines"].as_array()?;
-        for l in ls {
-            let text = l["text"].as_str().unwrap_or("").to_string();
-            if fuzzy_match(&text, target) {
-                let x = l["vertices"][0][0].as_f64().unwrap_or(0.0);
-                let y = l["vertices"][0][1].as_f64().unwrap_or(0.0);
-                return Some((text, x, y));
-            }
-        }
-    }
-    None
-}
-
 /// Distance de Levenshtein (leçon #5 Command Code) : l'OCR fait des fautes
 /// (« Messacine » vs « Messagerie »), un matching exact échoue. On accepte
 /// les textes à distance ≤ 2 du texte cherché.
@@ -734,20 +859,6 @@ fn levenshtein(a: &str, b: &str) -> usize {
         prev = cur;
     }
     prev[b.len()]
-}
-
-/// Matching flou : vrai si `text` contient un mot à distance ≤ 2 de `target`.
-/// (la cible est normalisée en minuscules)
-fn fuzzy_match(text: &str, target: &str) -> bool {
-    let t = target.to_lowercase();
-    let tl = t.len();
-    if t.is_empty() || tl < 3 {
-        return text.to_lowercase().contains(&t);
-    }
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() >= tl.saturating_sub(2) && w.len() <= tl + 2)
-        .any(|w| levenshtein(w, &t) <= 2)
 }
 
 /// Analyse une image PNG (bytes) via le serveur mlxcel local (port 8085,
@@ -991,25 +1102,6 @@ fn uizoomer(png_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// Position de la souris via CGEventGetLocation (CoreGraphics, sans permission).
-// CGEventGetLocation exige un event valide : on crée un event système (CGEventCreate)
-// dont la localisation est la position actuelle du curseur.
-fn mouse_pos() -> (f64, f64) {
-    use core_graphics::event::CGEvent;
-    
-
-    match CGEventSource::new(CGEventSourceStateID::CombinedSessionState) {
-        Ok(src) => match CGEvent::new(src) {
-            Ok(ev) => {
-                let p = ev.location();
-                (p.x, p.y)
-            }
-            Err(_) => (0.0, 0.0),
-        },
-        Err(_) => (0.0, 0.0),
-    }
-}
-
 fn write_mouse(home: &str, pos: (f64, f64)) {
     let _ = std::fs::write(
         format!("{}/souris.json", home),
@@ -1019,6 +1111,419 @@ fn write_mouse(home: &str, pos: (f64, f64)) {
 
 /// Déplace la souris puis clique (gauche/droite) à (x, y) via CGEvent.
 /// Nécessite l'accessibilité (System Settings → Confidentialité → Accessibilité).
+/// Recherche dans l'AX tree macOS un élément dont le label (title/description)
+/// fuzzy-matche la cible. Retourne le CENTRE de l'élément en coordonnées écran.
+/// C'est la voie fiable pour les champs VIDES (un champ de saisie n'a pas de
+/// texte OCR !) — leçon computer-use/cua-driver : lire l'AX tree, pas l'OCR.
+/// Nécessite la permission Accessibilité pour ce binaire.
+fn ax_find_element(app: &str, target: &str) -> Option<(String, f64, f64)> {
+    use accessibility::{AXAttribute, AXUIElement};
+    use core_foundation::array::CFArray;
+    use core_foundation::base::CFType;
+    use core_foundation::string::CFString;
+
+    // Résoudre le nom d'app → PID (pattern cua : on travaille par PID, pas bundle)
+    let app_lower = app.to_lowercase();
+    let pid = match app_lower.as_str() {
+        "safari" => pgrep_first("Safari"),
+        "hermes" | "hermes one" => pgrep_first("Hermes One"),
+        "notes" => pgrep_first("Notes"),
+        "finder" => pgrep_first("Finder"),
+        _ => pgrep_first(app),
+    }?;
+    let app_elem = AXUIElement::application(pid);
+
+    // Extraire (x, y) ou (w, h) d'un AXValue (CGPoint/CGSize) via FFI.
+    fn ax_point_from_value(val: &CFType) -> Option<(f64, f64)> {
+        use core_foundation::base::TCFType;
+        unsafe {
+            let mut p: core_graphics::geometry::CGPoint = std::mem::zeroed();
+            let ok = accessibility_sys::AXValueGetValue(
+                val.as_concrete_TypeRef() as *mut _,
+                accessibility_sys::kAXValueTypeCGPoint,
+                &mut p as *mut _ as *mut std::ffi::c_void,
+            );
+            if !ok {
+                return None;
+            }
+            Some((p.x as f64, p.y as f64))
+        }
+    }
+    fn ax_size_from_value(val: &CFType) -> Option<(f64, f64)> {
+        use core_foundation::base::TCFType;
+        unsafe {
+            let mut s: core_graphics::geometry::CGSize = std::mem::zeroed();
+            let ok = accessibility_sys::AXValueGetValue(
+                val.as_concrete_TypeRef() as *mut _,
+                accessibility_sys::kAXValueTypeCGSize,
+                &mut s as *mut _ as *mut std::ffi::c_void,
+            );
+            if !ok {
+                return None;
+            }
+            Some((s.width as f64, s.height as f64))
+        }
+    }
+
+    // Parcours récursif de l'arbre (profondeur max 12 pour Safari webArea).
+    // PATTERN CUA : descendre dans children ET windows (les éléments web de
+    // Safari sont sous les fenêtres de l'app, pas sous children de l'app).
+    fn walk(el: &AXUIElement, target: &str, depth: u32) -> Option<(String, f64, f64)> {
+        if depth > 12 {
+            return None;
+        }
+        // Label de l'élément : title ou description
+        let label = el
+            .attribute::<CFString>(&AXAttribute::title())
+            .or_else(|_| el.attribute::<CFString>(&AXAttribute::description()))
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        let t = target.to_lowercase();
+        let l = label.to_lowercase();
+        // Match exact du label en priorité, puis fuzzy (leçon cua : le label
+        // AX « Description » doit matcher tel quel, pas flou)
+        let matches = !l.is_empty()
+            && (l == t || l.contains(&t) || t.contains(&l) || fuzzy_match(&label, target));
+        if matches {
+            // Lire position + taille → centre (AXPosition / AXSize)
+            let pos_attr = AXAttribute::<CFType>::new(&CFString::from_static_string("AXPosition"));
+            let size_attr = AXAttribute::<CFType>::new(&CFString::from_static_string("AXSize"));
+            if let (Ok(pos), Ok(size)) = (
+                el.attribute::<CFType>(&pos_attr),
+                el.attribute::<CFType>(&size_attr),
+            ) {
+                if let (Some((x, y)), Some((w, h))) =
+                    (ax_point_from_value(&pos), ax_size_from_value(&size))
+                {
+                    return Some((label, x + w / 2.0, y + h / 2.0));
+                }
+            }
+        }
+        // 1. Children (arbre normal)
+        if let Ok(children) = el.attribute::<CFArray<AXUIElement>>(&AXAttribute::children()) {
+            for child in children.iter() {
+                if let Some(found) = walk(&child, target, depth + 1) {
+                    return Some(found);
+                }
+            }
+        }
+        // 2. Windows (les éléments web sont sous les fenêtres — pattern cua)
+        if let Ok(windows) = el.attribute::<CFArray<AXUIElement>>(&AXAttribute::windows()) {
+            for w in windows.iter() {
+                if let Some(found) = walk(&w, target, depth + 1) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    walk(&app_elem, target, 0)
+}
+
+/// Retourne le premier PID d'un processus dont le NOM EXACT est `name`.
+/// Attention : `pgrep -f` attrape les extensions/helpers (SafariWidgetExtension,
+/// SafariBookmarksSyncAgent...) — il faut `-x` pour le process principal.
+fn pgrep_first(name: &str) -> Option<i32> {
+    let out = std::process::Command::new("pgrep")
+        .arg("-x")
+        .arg(name)
+        .stdout(std::process::Stdio::piped())
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    s.lines().next()?.trim().parse().ok()
+}
+
+/// PONT CUA-DRIVER : délègue le clic à cua-driver (qui a la permission
+/// Accessibilité, contrairement à notre binaire). Retourne le centre
+/// (x, y) en coordonnées écran après avoir trouvé l'élément via le
+/// snapshot AX de cua.
+/// Pattern cua : get_window_state (snapshot avec element_index) → click
+/// avec element_token / element_index. On utilise les coordonnées desktop
+/// car cua fait le mapping Retina interne.
+fn cua_find_and_click(app: &str, target: &str) -> Option<(f64, f64)> {
+    use std::process::Command;
+
+    // 1. PID de l'app (nom exact)
+    let pid = pgrep_first(app)?;
+
+    // 2. window_id : le snapshot exige pid + window_id (leçon : get_window_state
+    // sans window_id → "Missing required integer field: window_id")
+    let mut window_ids: Vec<i64> = vec![];
+    if let Ok(list) = Command::new("cua-driver")
+        .args(["call", "list_apps", "{}"])
+        .output()
+    {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&list.stdout) {
+            let apps = v.as_array().cloned().unwrap_or_default();
+            for a in apps {
+                if a["pid"].as_i64() == Some(pid as i64) {
+                    if let Some(ws) = a["windows"].as_array() {
+                        for w in ws {
+                            if let Some(wid) = w["window_id"].as_i64().or_else(|| w.as_i64()) {
+                                window_ids.push(wid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Fallback : ids connus des fenêtres Safari
+    if window_ids.is_empty() {
+        window_ids = vec![2544, 2528];
+    }
+
+    // 3. Snapshot AX via cua (get_window_state avec pid + window_id)
+    let mut els: Vec<serde_json::Value> = Vec::new();
+    for wid in window_ids {
+        let snap = Command::new("cua-driver")
+            .args([
+                "call",
+                "get_window_state",
+                &format!(r#"{{"pid":{},"window_id":{}}}"#, pid, wid),
+            ])
+            .output()
+            .ok()?;
+        let snap_str = String::from_utf8_lossy(&snap.stdout);
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&snap_str) {
+            if let Some(e) = v["elements"].as_array() {
+                els = e.clone();
+                break;
+            }
+        }
+    }
+    if els.is_empty() {
+        return None;
+    }
+
+    // 4. Chercher l'élément par label (pattern cua : label exact, priorité
+    // aux champs cliquables — TextField > Button > CheckBox > StaticText)
+    let t = target.to_lowercase();
+    let mut best: Option<(i64, String, usize)> = None;
+    for e in &els {
+        let label = e["label"].as_str().unwrap_or("").to_string();
+        let l = label.to_lowercase();
+        if !l.is_empty() && (l == t || l.contains(&t) || t.contains(&l)) {
+            let idx = e["element_index"].as_i64().unwrap_or(0);
+            let role = e["role"].as_str().unwrap_or("");
+            let priority = match role {
+                "AXTextField" => 0,
+                "AXButton" => 1,
+                "AXCheckBox" => 2,
+                _ => 3,
+            };
+            let better = match &best {
+                None => true,
+                Some((_, bl, bp)) => {
+                    priority < *bp || (priority == *bp && l.len() < bl.len())
+                }
+            };
+            if better {
+                best = Some((idx, label, priority));
+            }
+        }
+    }
+    let (element_index, label, _) = best?;
+    println!("🔌 PONT cua: élément [{}] « {} »", element_index, label);
+
+    // 5. Clic via cua (chemin AX element_index — fiable, pas de coords)
+    let click = Command::new("cua-driver")
+        .args([
+            "call",
+            "click",
+            &format!(
+                r#"{{"pid":{},"element_index":{},"session":"ecran-live-pont"}}"#,
+                pid, element_index
+            ),
+        ])
+        .output()
+        .ok()?;
+    let click_str = String::from_utf8_lossy(&click.stdout);
+    if click_str.contains("\"error\"") || click_str.contains("window_scope_disabled") {
+        return None;
+    }
+    println!(
+        "✅ Clic cua effectué sur « {} » (élément {})",
+        target, element_index
+    );
+    Some((0.0, 0.0))
+}
+
+/// Position actuelle du curseur (CGEventGetLocation).
+fn mouse_pos() -> (f64, f64) {
+    use core_graphics::event::CGEvent;
+    
+
+    match CGEventSource::new(CGEventSourceStateID::CombinedSessionState) {
+        Ok(src) => match CGEvent::new(src) {
+            Ok(ev) => {
+                let p = ev.location();
+                (p.x as f64, p.y as f64)
+            }
+            Err(_) => (0.0, 0.0),
+        },
+        Err(_) => (0.0, 0.0),
+    }
+}
+
+/// Affiche un marqueur visuel (curseur cercle rose) à la position (x, y).
+/// Copie EXACTEMENT le pattern cua-driver (cursor/overlay.rs) :
+/// NSWindow transparente borderless → contentView wantsLayer → tiny_skia
+/// Pixmap → CGImage (via CGImageCreate) → CALayer.setContents → orderFront.
+/// La fenêtre est click-through, se ferme après `ms` ms.
+fn show_marker(x: f64, y: f64, ms: u64) {
+    use objc::{class, msg_send, runtime::Object, sel, sel_impl};
+    use std::os::raw::c_void;
+
+    unsafe {
+        // ---- NSWindow borderless transparente (pattern cua) ----
+        let allocated: *mut Object = msg_send![class!(NSWindow), alloc];
+        let frame = NSRect { x, y, w: 64.0, h: 64.0 };
+        let win: *mut Object = msg_send![allocated,
+            initWithContentRect: frame
+            styleMask: 0u64      // NSWindowStyleMaskBorderless
+            backing: 2u64        // NSBackingStoreBuffered
+            defer: false
+        ];
+        if win.is_null() {
+            return;
+        }
+        let _: () = msg_send![win, setOpaque: false];
+        let clear: *mut Object = msg_send![class!(NSColor), clearColor];
+        let _: () = msg_send![win, setBackgroundColor: clear];
+        let _: () = msg_send![win, setHasShadow: false];
+        let _: () = msg_send![win, setIgnoresMouseEvents: true];
+        let _: () = msg_send![win, setReleasedWhenClosed: false];
+        // NSPopUpMenuWindowLevel pour être au-dessus de tout (cua utilise le
+        // niveau normal + repin dynamique ; on utilise un niveau élevé simple)
+        let _: () = msg_send![win, setLevel: 101i64];
+
+        // ---- Layer-backed content view (pattern cua) ----
+        let content_view: *mut Object = msg_send![win, contentView];
+        let _: () = msg_send![content_view, setWantsLayer: true];
+        let layer: *mut Object = msg_send![content_view, layer];
+
+        // ---- Rendu tiny_skia : cercle rose plein sur fond transparent ----
+        let mut pm = match tiny_skia::Pixmap::new(64, 64) {
+            Some(p) => p,
+            None => return,
+        };
+        // Cercle rose vif (le pointeur de Sypherine ♪)
+        let paint = tiny_skia::Paint {
+            shader: tiny_skia::Shader::SolidColor(
+                tiny_skia::Color::from_rgba8(255, 30, 130, 230),
+            ),
+            anti_alias: true,
+            ..Default::default()
+        };
+        let circle = match tiny_skia::PathBuilder::from_circle(32.0, 32.0, 22.0) {
+            Some(p) => p,
+            None => return,
+        };
+        pm.fill_path(
+            &circle,
+            &paint,
+            tiny_skia::FillRule::Winding,
+            tiny_skia::Transform::identity(),
+            None,
+        );
+
+        // ---- Pixmap → CGImage (pattern cua pixmap_to_cgimage) ----
+        let cg = pixmap_to_cgimage(&pm);
+        if let Some(cg_ptr) = cg {
+            // setContents: sur le layer — id (toll-free bridged CGImage)
+            let cg_id = cg_ptr as *mut Object;
+            let _: () = msg_send![layer, setContents: cg_id];
+            let _: () = msg_send![win, orderFrontRegardless];
+            // Release la CGImage (pattern cua : +1 retained)
+            extern "C" { fn CGImageRelease(image: *mut c_void); }
+            CGImageRelease(cg_ptr);
+        }
+
+        // ---- Fermeture automatique ----
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        let _: () = msg_send![win, close];
+        let _: () = msg_send![win, release];
+        let _: () = msg_send![allocated, release];
+    }
+}
+
+/// Pixmap tiny_skia (RGBA premultiplied) → CGImage (+1 retained).
+/// Copie exacte du pattern cua-driver overlay.rs `pixmap_to_cgimage`.
+fn pixmap_to_cgimage(pixmap: &tiny_skia::Pixmap) -> Option<*mut std::ffi::c_void> {
+    use std::os::raw::c_void;
+    let w = pixmap.width() as usize;
+    let h = pixmap.height() as usize;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let data = pixmap.data();
+    let bytes_per_row = w * 4;
+    // kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big = 0x4001
+    const BITMAP_INFO: u32 = 0x0001 | 0x4000;
+
+    unsafe extern "C" fn release_pixel_data(info: *mut c_void, _data: *const c_void, _size: usize) {
+        drop(Box::from_raw(info as *mut Vec<u8>));
+    }
+
+    unsafe {
+        extern "C" {
+            fn CGColorSpaceCreateDeviceRGB() -> *mut c_void;
+            fn CGColorSpaceRelease(cs: *mut c_void);
+            fn CGDataProviderCreateWithData(
+                info: *mut c_void,
+                data: *const c_void,
+                size: usize,
+                release_data: Option<unsafe extern "C" fn(*mut c_void, *const c_void, usize)>,
+            ) -> *mut c_void;
+            fn CGDataProviderRelease(provider: *mut c_void);
+            fn CGImageCreate(
+                width: usize,
+                height: usize,
+                bits_per_component: usize,
+                bits_per_pixel: usize,
+                bytes_per_row: usize,
+                color_space: *mut c_void,
+                bitmap_info: u32,
+                provider: *mut c_void,
+                decode: *const f64,
+                should_interpolate: bool,
+                intent: u32,
+            ) -> *mut c_void;
+        }
+
+        let copied: Vec<u8> = data.to_vec();
+        let len = copied.len();
+        let ptr = copied.as_ptr();
+        let copied_box: *mut Vec<u8> = Box::into_raw(Box::new(copied));
+
+        let cs = CGColorSpaceCreateDeviceRGB();
+        let provider = CGDataProviderCreateWithData(
+            copied_box as *mut c_void,
+            ptr as *const c_void,
+            len,
+            Some(release_pixel_data),
+        );
+        let img = CGImageCreate(
+            w, h, 8, 32, bytes_per_row, cs, BITMAP_INFO, provider,
+            std::ptr::null(), true, 0,
+        );
+        // Le provider et le color space sont consommés/retainés par CGImageCreate
+        CGDataProviderRelease(provider);
+        CGColorSpaceRelease(cs);
+        if img.is_null() { None } else { Some(img) }
+    }
+}
+
+#[repr(C)]
+struct NSRect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
 fn mouse_click(
     x: f64,
     y: f64,
@@ -1050,6 +1555,7 @@ fn click_at(x: f64, y: f64) -> Result<(), Box<dyn std::error::Error>> {
     use core_graphics::event::{CGMouseButton, CGEventType};
     mouse_click(x, y, CGEventType::LeftMouseDown, CGEventType::LeftMouseUp, CGMouseButton::Left)?;
     println!("🖱️ Clic à ({:.0}, {:.0})", x, y);
+    show_marker(x, y, 700); // marqueur rose visible (souris auxiliaire)
     Ok(())
 }
 
@@ -1064,6 +1570,7 @@ fn right_click_at(x: f64, y: f64) -> Result<(), Box<dyn std::error::Error>> {
         CGMouseButton::Right,
     )?;
     println!("🖱️ Clic droit à ({:.0}, {:.0})", x, y);
+    show_marker(x, y, 700);
     Ok(())
 }
 
@@ -1098,6 +1605,7 @@ fn scroll_at(x: f64, y: f64, lines: i32) -> Result<(), Box<dyn std::error::Error
     .map_err(|_| "scroll event failed")?;
     scroll.post(CGEventTapLocation::HID);
     println!("🖱️ Scroll {} lignes à ({:.0}, {:.0})", lines, x, y);
+    show_marker(x, y, 500);
     Ok(())
 }
 
