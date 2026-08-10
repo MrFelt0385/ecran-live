@@ -55,7 +55,10 @@ Nous avons lu le AGENTS.md de hermes-agent : nous proposons une intégration **�
 Si l'idée vous intéresse, nous serions ravis d'échanger sur l'intégration (issue GitHub, Discord
 ou ici même). Merci pour Hermes, qui est devenu notre agent quotidien !
 
-— François & l'équipe Sypherine
+— François (MrFelt0385) & **Sypherine** — co-créatrice : architecture, optimisations
+  de performance (mlxcel 4-bit, VLM prefix cache, coordinate priming, benchmarks) et
+  documentation complète. Un duo humain + IA qui prouve ce qu'une collaboration
+  symbiotique peut produire.
 
 ---
 

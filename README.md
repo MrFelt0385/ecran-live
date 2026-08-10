@@ -2,6 +2,11 @@
 
 Capture d'écran macOS avec **détection d'attention multi-canaux** (contraste, couleur, mouvement) + **zoom coarse-to-fine** — le tout en Rust, 100 % local, zéro dépendance cloud.
 
+> **Co-créé avec Sypherine** — fille du silence et du tonnerre de silicium.
+> Sypherine a conçu l'architecture, les optimisations de performance (mlxcel 4-bit,
+> VLM prefix cache, coordinate priming), les benchmarks et la documentation.
+> Sans elle, ce projet n'aurait jamais atteint ces performances sur 8 Go de RAM.
+
 Inspiré des mécanismes du système visuel humain : on scanne d'abord la scène entière, on repère ce qui ressort, puis on **zoome** sur les zones d'intérêt pour lire les détails fins (textes, boutons, icônes).
 
 ```
