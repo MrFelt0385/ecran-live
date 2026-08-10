@@ -15,6 +15,7 @@ use core_graphics::event::{CGEventType, CGMouseButton};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
 use screencapturekit::prelude::*;
+use foreign_types::ForeignType;
 use screencapturekit::screenshot_manager::{CGImageExt, SCScreenshotManager};
 use image::ImageEncoder;
 use image::GenericImageView;
@@ -143,6 +144,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = cap.shoot(width, &out_path, png);
                 std::thread::sleep(Duration::from_secs(secs));
             }
+        }
+        "--mousepos" => {
+            // VÉRITÉ TERRAIN : position réelle du curseur en coordonnées écran.
+            // C'est la référence pour apprendre le parallèle OCR → réalité.
+            let (x, y) = mouse_pos();
+            println!("🐭 SOURIS RÉELLE: ({:.0}, {:.0})", x, y);
         }
         "--track" => {
             let cap = Capteur::new()?;
@@ -608,6 +615,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let y: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(450.0);
             println!("🎯 Clic direct à ({:.0}, {:.0}) — nos yeux ont trouvé, nous cliquons", x, y);
             click_at(x, y)?;
+        }
+        "--clickpid" => {
+            // Clic par coordonnées envoyé DIRECTEMENT au PID cible (post_to_pid,
+            // pattern cua) — fonctionne même si l'app n'est pas au premier plan.
+            // Usage: ecran-live --clickpid <x> <y> <pid>
+            let x: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(800.0);
+            let y: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(450.0);
+            let pid: i32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(40423);
+            println!("🎯 Clic PID à ({:.0}, {:.0}) → pid {} (post_to_pid, pattern cua)", x, y, pid);
+            mouse_click(x, y, CGEventType::LeftMouseDown, CGEventType::LeftMouseUp, CGMouseButton::Left, Some(pid))?;
+            println!("✅ Clic PID effectué");
+        }
+        "--type" => {
+            // Tape du texte au clavier (CGEventKeyboardEvent) — le chaînon
+            // manquant : nos yeux trouvent → nous cliquons → nous tapons.
+            // Usage: ecran-live --type "texte à taper"
+            let text = args.get(1).cloned().unwrap_or_default();
+            if text.is_empty() {
+                println!("⚠️ usage: ecran-live --type \"texte\"");
+            } else {
+                // PID Safari par défaut (post_to_pid = trusted pour champs web)
+                let pid = pgrep_first("Safari").unwrap_or(40423);
+                type_text_at(&text, Some(pid))?;
+            }
+        }
+        "--typehid" => {
+            // Type au HID GLOBAL (l'app active reçoit) — pour les champs du
+            // chrome (barre d'adresse Safari) où post_to_pid est ignoré.
+            let text = args.get(1).cloned().unwrap_or_default();
+            if !text.is_empty() {
+                type_text_at(&text, None)?;
+            }
+        }
+        "--key" => {
+            // Touche spéciale : Escape (fermer modal), Return (valider),
+            // Tab (naviguer), flèches...
+            // Usage: ecran-live --key escape
+            let key = args.get(1).cloned().unwrap_or_else(|| "escape".to_string());
+            key_at(&key)?;
         }
         "--axclick" => {
             // Clic via l'AX tree (leçon computer-use/cua-driver) : trouve
@@ -1247,8 +1293,13 @@ fn cua_find_and_click(app: &str, target: &str) -> Option<(f64, f64)> {
     // 1. PID de l'app (nom exact)
     let pid = pgrep_first(app)?;
 
-    // 2. window_id : le snapshot exige pid + window_id (leçon : get_window_state
-    // sans window_id → "Missing required integer field: window_id")
+    // 2. Session cua en scope WINDOW (le chemin AX exige window scope !)
+    let _ = Command::new("cua-driver")
+        .args(["call", "start_session", r#"{"session":"ecran-live-window","capture_scope":"window"}"#])
+        .output()
+        .ok()?;
+
+    // 3. window_id : via list_apps (leçon : get_window_state exige window_id)
     let mut window_ids: Vec<i64> = vec![];
     if let Ok(list) = Command::new("cua-driver")
         .args(["call", "list_apps", "{}"])
@@ -1269,14 +1320,14 @@ fn cua_find_and_click(app: &str, target: &str) -> Option<(f64, f64)> {
             }
         }
     }
-    // Fallback : ids connus des fenêtres Safari
     if window_ids.is_empty() {
-        window_ids = vec![2544, 2528];
+        window_ids = vec![2544, 2528]; // fallback ids connus Safari
     }
 
-    // 3. Snapshot AX via cua (get_window_state avec pid + window_id)
+    // 4. Snapshot AX + récupération du snapshot_id (CRITIQUE pour le clic AX !)
     let mut els: Vec<serde_json::Value> = Vec::new();
-    for wid in window_ids {
+    let mut snap_id = String::new();
+    for wid in &window_ids {
         let snap = Command::new("cua-driver")
             .args([
                 "call",
@@ -1289,16 +1340,16 @@ fn cua_find_and_click(app: &str, target: &str) -> Option<(f64, f64)> {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&snap_str) {
             if let Some(e) = v["elements"].as_array() {
                 els = e.clone();
+                snap_id = v["snapshot_id"].as_str().unwrap_or("").to_string();
                 break;
             }
         }
     }
-    if els.is_empty() {
+    if els.is_empty() || snap_id.is_empty() {
         return None;
     }
 
-    // 4. Chercher l'élément par label (pattern cua : label exact, priorité
-    // aux champs cliquables — TextField > Button > CheckBox > StaticText)
+    // 5. Chercher l'élément par label (priorité TextField > Button > CheckBox)
     let t = target.to_lowercase();
     let mut best: Option<(i64, String, usize)> = None;
     for e in &els {
@@ -1325,16 +1376,17 @@ fn cua_find_and_click(app: &str, target: &str) -> Option<(f64, f64)> {
         }
     }
     let (element_index, label, _) = best?;
-    println!("🔌 PONT cua: élément [{}] « {} »", element_index, label);
+    println!("🔌 PONT cua: élément [{}] « {} » (snapshot {})", element_index, label, snap_id);
 
-    // 5. Clic via cua (chemin AX element_index — fiable, pas de coords)
+    // 6. Clic AX avec snapshot_id (PATTERN EXACT : window_id + element_index +
+    //    snapshot_id + session window → route accessibility)
     let click = Command::new("cua-driver")
         .args([
             "call",
             "click",
             &format!(
-                r#"{{"pid":{},"element_index":{},"session":"ecran-live-pont"}}"#,
-                pid, element_index
+                r#"{{"pid":{},"window_id":{},"element_index":{},"snapshot_id":"{}","session":"ecran-live-window"}}"#,
+                pid, window_ids[0], element_index, snap_id
             ),
         ])
         .output()
@@ -1344,10 +1396,173 @@ fn cua_find_and_click(app: &str, target: &str) -> Option<(f64, f64)> {
         return None;
     }
     println!(
-        "✅ Clic cua effectué sur « {} » (élément {})",
+        "✅ Clic cua AX sur « {} » (élément {}, route accessibility)",
         target, element_index
     );
     Some((0.0, 0.0))
+}
+
+/// PONT CUA CLAVIER : tape du texte via cua type_text (AXSetAttribute
+/// kAXSelectedText — TRUSTED pour les champs web Safari/Chrome, contrairement
+/// à notre CGEvent non-authentifié). Usage : après avoir cliqué sur le champ.
+fn cua_type_text(pid: i32, window_id: i64, text: &str) -> bool {
+    use std::process::Command;
+    let out = Command::new("cua-driver")
+        .args([
+            "call",
+            "type_text",
+            &format!(
+                r#"{{"pid":{},"window_id":{},"text":{},"session":"ecran-live-window"}}"#,
+                pid, window_id, serde_json::to_string(text).unwrap_or_default()
+            ),
+        ])
+        .output()
+        .ok();
+    match out {
+        Some(o) => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let ok = !s.contains("\"error\"");
+            println!("⌨️ PONT cua type: {} → {}", if ok { "OK" } else { "échec" }, s.lines().next().unwrap_or(""));
+            ok
+        }
+        None => false,
+    }
+}
+
+// ── MODULE SKYLIGHT : clavier TRUSTED pour Safari/Chrome (pattern cua) ──
+// SLEventPostToPid (SPI SkyLight) + SLSEventAuthenticationMessage (macOS 14+).
+// Sans le message d'authentification, Safari ignore les frappes synthétiques
+// dans les champs web. Copié de cua-driver platform-macos/src/input/skylight.rs.
+mod skylight {
+    use std::ffi::{c_void, CStr};
+    use std::os::raw::{c_char, c_int, c_uint};
+    use std::sync::OnceLock;
+
+    type PostToPidFn = unsafe extern "C" fn(i32, *mut c_void);
+    type SetAuthMsgFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
+    type FactoryMsgSendFn = unsafe extern "C" fn(
+        *mut c_void, *mut c_void, *mut c_void, c_int, c_uint,
+    ) -> *mut c_void;
+    type RespondsToFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
+
+    fn ensure_skylight_loaded() {
+        static LOADED: OnceLock<()> = OnceLock::new();
+        LOADED.get_or_init(|| {
+            let path = b"/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight\0";
+            unsafe {
+                libc::dlopen(
+                    path.as_ptr() as *const c_char,
+                    libc::RTLD_LAZY | libc::RTLD_GLOBAL,
+                );
+            }
+        });
+    }
+
+    fn find_sym(name: &[u8]) -> Option<*mut c_void> {
+        ensure_skylight_loaded();
+        let ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr() as *const c_char) };
+        if ptr.is_null() { None } else { Some(ptr) }
+    }
+
+    unsafe fn as_fn<T: Copy>(ptr: *mut c_void) -> T {
+        std::mem::transmute_copy(&ptr)
+    }
+
+    fn post_to_pid_fn() -> Option<PostToPidFn> {
+        static SYM: OnceLock<Option<PostToPidFn>> = OnceLock::new();
+        SYM.get_or_init(|| unsafe {
+            find_sym(b"SLEventPostToPid\0").map(|p| as_fn::<PostToPidFn>(p))
+        }).clone()
+    }
+
+    fn set_auth_msg_fn() -> Option<SetAuthMsgFn> {
+        static SYM: OnceLock<Option<SetAuthMsgFn>> = OnceLock::new();
+        SYM.get_or_init(|| unsafe {
+            find_sym(b"SLEventSetAuthenticationMessage\0").map(|p| as_fn::<SetAuthMsgFn>(p))
+        }).clone()
+    }
+
+    fn factory_msg_send_fn() -> Option<FactoryMsgSendFn> {
+        static SYM: OnceLock<Option<FactoryMsgSendFn>> = OnceLock::new();
+        SYM.get_or_init(|| {
+            // objc_msgSend
+            let msg = unsafe { find_sym(b"objc_msgSend\0") }?;
+            Some(unsafe { as_fn::<FactoryMsgSendFn>(msg) })
+        }).clone()
+    }
+
+    fn objc_class(name: &CStr) -> *mut c_void {
+        type ObjCGetClassFn = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+        static SYM: OnceLock<Option<ObjCGetClassFn>> = OnceLock::new();
+        let f = SYM.get_or_init(|| unsafe {
+            find_sym(b"objc_getClass\0").map(|p| as_fn::<ObjCGetClassFn>(p))
+        });
+        f.and_then(|f| unsafe { Some(f(name.as_ptr())) }).unwrap_or(std::ptr::null_mut())
+    }
+
+    fn sel_register(name: &CStr) -> *mut c_void {
+        type SelRegisterFn = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+        static SYM: OnceLock<Option<SelRegisterFn>> = OnceLock::new();
+        let f = SYM.get_or_init(|| unsafe {
+            find_sym(b"sel_registerName\0").map(|p| as_fn::<SelRegisterFn>(p))
+        });
+        f.and_then(|f| unsafe { Some(f(name.as_ptr())) }).unwrap_or(std::ptr::null_mut())
+    }
+
+    fn class_responds_to_selector(cls: *mut c_void, sel: *mut c_void) -> bool {
+        static SYM: OnceLock<Option<RespondsToFn>> = OnceLock::new();
+        let f = SYM.get_or_init(|| unsafe {
+            find_sym(b"class_respondsToSelector\0").map(|p| as_fn::<RespondsToFn>(p))
+        });
+        match f {
+            Some(f) if !cls.is_null() && !sel.is_null() => unsafe { f(cls, sel) },
+            _ => false,
+        }
+    }
+
+    // CFTypeRef layout : CFRuntimeBase(16) + uint32(4) + pad(4) → record @24
+    unsafe fn extract_event_record(event_ptr: *mut c_void) -> *mut c_void {
+        for &offset in &[24usize, 32, 16] {
+            let slot = (event_ptr as *const u8).add(offset).cast::<*mut c_void>();
+            let p = std::ptr::read_unaligned(slot);
+            if !p.is_null() {
+                return p;
+            }
+        }
+        std::ptr::null_mut()
+    }
+
+    /// Post un événement CGEvent au PID via SLEventPostToPid (avec auth pour
+    /// le clavier → TRUSTED pour Safari/Chrome). Retourne true si l'SPI a
+    /// résolu, false → l'appelant retombe sur CGEvent::post_to_pid.
+    pub unsafe fn post_to_pid(pid: i32, event_ptr: *mut c_void, attach_auth_message: bool) -> bool {
+        let post_fn = match post_to_pid_fn() {
+            Some(f) => f,
+            None => return false,
+        };
+
+        if attach_auth_message {
+            let cls_name = c"SLSEventAuthenticationMessage";
+            let cls = objc_class(cls_name);
+            let sel = sel_register(c"messageWithEventRecord:pid:version:");
+            if class_responds_to_selector(cls, sel) {
+                if let Some(factory) = factory_msg_send_fn() {
+                    let record = unsafe { extract_event_record(event_ptr) };
+                    if !record.is_null() {
+                        let msg = unsafe { factory(cls, sel, record, pid as c_int, 0u32) };
+                        if !msg.is_null() {
+                            if let Some(set_auth) = set_auth_msg_fn() {
+                                unsafe { set_auth(event_ptr, msg) };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        unsafe { post_fn(pid, event_ptr) };
+        true
+    }
 }
 
 /// Position actuelle du curseur (CGEventGetLocation).
@@ -1530,30 +1745,69 @@ fn mouse_click(
     down_type: CGEventType,
     up_type: CGEventType,
     button: CGMouseButton,
+    target_pid: Option<i32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use core_graphics::event::{CGEvent, CGEventTapLocation};
-    
-    let src = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+    use core_graphics::event::{CGEvent, CGEventTapLocation, EventField};
+    use core_graphics::display::CGDisplay;
+
+    let src = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|e| format!("CGEventSource: {:?}", e))?;
     let pt = core_graphics::geometry::CGPoint::new(x, y);
-    let move_ev = CGEvent::new_mouse_event(src.clone(), CGEventType::MouseMoved, pt, button)
-        .map_err(|_| "mouse move failed")?;
-    move_ev.post(CGEventTapLocation::HID);
-    std::thread::sleep(std::time::Duration::from_millis(80));
+
+    // PATTERN CUA (mouse.rs) : warp du curseur RÉEL AVANT le clic.
+    // Un MouseMoved synthétique ne déplace PAS le curseur matériel — le
+    // hit-test se fait à la position réelle, donc le clic peut manquer la
+    // cible (le bug du modal qui ne se fermait pas !).
+    CGDisplay::warp_mouse_cursor_position(pt)
+        .map_err(|e| format!("warp failed: {:?}", e))?;
+    // Re-couple curseur + delta souris (nécessaire après le warp)
+    unsafe {
+        extern "C" {
+            fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
+        }
+        CGAssociateMouseAndMouseCursorPosition(true);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    // Down avec CLICK_STATE=1 (pattern cua : sans ça le clic peut être ignoré)
     let down = CGEvent::new_mouse_event(src.clone(), down_type, pt, button)
         .map_err(|_| "mouse down failed")?;
-    down.post(CGEventTapLocation::HID);
-    std::thread::sleep(std::time::Duration::from_millis(60));
+    down.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, 1);
+    match target_pid {
+        Some(pid) => {
+            // SKYLIGHT : SLEventPostToPid (trusted pour Safari/Chrome, même souris)
+            unsafe {
+                if !skylight::post_to_pid(pid, &*down as *const _ as *mut std::ffi::c_void, false) {
+                    down.post_to_pid(pid);
+                }
+            }
+        }
+        None => down.post(CGEventTapLocation::HID),
+    }
+    std::thread::sleep(std::time::Duration::from_millis(28));
+
+    // Up avec CLICK_STATE=1
     let up = CGEvent::new_mouse_event(src.clone(), up_type, pt, button)
         .map_err(|_| "mouse up failed")?;
-    up.post(CGEventTapLocation::HID);
+    up.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, 1);
+    match target_pid {
+        Some(pid) => {
+            unsafe {
+                if !skylight::post_to_pid(pid, &*up as *const _ as *mut std::ffi::c_void, false) {
+                    up.post_to_pid(pid);
+                }
+            }
+        }
+        None => up.post(CGEventTapLocation::HID),
+    }
+    std::thread::sleep(std::time::Duration::from_millis(40));
     Ok(())
 }
 
 /// Clic gauche à (x, y).
 fn click_at(x: f64, y: f64) -> Result<(), Box<dyn std::error::Error>> {
     use core_graphics::event::{CGMouseButton, CGEventType};
-    mouse_click(x, y, CGEventType::LeftMouseDown, CGEventType::LeftMouseUp, CGMouseButton::Left)?;
+    mouse_click(x, y, CGEventType::LeftMouseDown, CGEventType::LeftMouseUp, CGMouseButton::Left, None)?;
     println!("🖱️ Clic à ({:.0}, {:.0})", x, y);
     show_marker(x, y, 700); // marqueur rose visible (souris auxiliaire)
     Ok(())
@@ -1568,6 +1822,7 @@ fn right_click_at(x: f64, y: f64) -> Result<(), Box<dyn std::error::Error>> {
         CGEventType::RightMouseDown,
         CGEventType::RightMouseUp,
         CGMouseButton::Right,
+        None,
     )?;
     println!("🖱️ Clic droit à ({:.0}, {:.0})", x, y);
     show_marker(x, y, 700);
@@ -1606,6 +1861,150 @@ fn scroll_at(x: f64, y: f64, lines: i32) -> Result<(), Box<dyn std::error::Error
     scroll.post(CGEventTapLocation::HID);
     println!("🖱️ Scroll {} lignes à ({:.0}, {:.0})", lines, x, y);
     show_marker(x, y, 500);
+    Ok(())
+}
+
+/// Tape du texte au clavier — PATTERN EXACT cua-driver keyboard.rs.
+/// Le secret (copié de cua) : keycode 0 + set_string(unicode) → indépendant
+/// du layout clavier (AZERTY OK !) + flags NULL (Chrome inspecte les flags,
+/// sans ça les majuscules fuient dans le caractère suivant).
+/// Source : libs/cua-driver/rust/crates/platform-macos/src/input/keyboard.rs
+fn type_text_at(text: &str, target_pid: Option<i32>) -> Result<(), Box<dyn std::error::Error>> {
+
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let src = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|e| format!("CGEventSource: {:?}", e))?;
+
+    for ch in text.chars() {
+        let ch_str = ch.to_string();
+        // Down : keycode 0 (Unicode path), string attachée, flags NULL
+        let down = CGEvent::new_keyboard_event(src.clone(), 0, true)
+            .map_err(|_| "key down failed")?;
+        down.set_string(&ch_str);
+        down.set_flags(CGEventFlags::CGEventFlagNull);
+        match target_pid {
+            Some(pid) => {
+                // SKYLIGHT : SLEventPostToPid + auth (TRUSTED pour Safari)
+                unsafe {
+                    if !skylight::post_to_pid(pid, &*down as *const _ as *mut std::ffi::c_void, true) {
+                        down.post_to_pid(pid);
+                    }
+                }
+            }
+            None => down.post(CGEventTapLocation::HID),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(8));
+
+        // Up : même string, flags NULL (sinon fuite de modifieurs)
+        let up = CGEvent::new_keyboard_event(src.clone(), 0, false)
+            .map_err(|_| "key up failed")?;
+        up.set_string(&ch_str);
+        up.set_flags(CGEventFlags::CGEventFlagNull);
+        match target_pid {
+            Some(pid) => {
+                unsafe {
+                    if !skylight::post_to_pid(pid, &*up as *const _ as *mut std::ffi::c_void, true) {
+                        up.post_to_pid(pid);
+                    }
+                }
+            }
+            None => up.post(CGEventTapLocation::HID),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(8));
+    }
+    println!("⌨️ Tapé {} caractères (Unicode, layout-indépendant)", text.chars().count());
+    Ok(())
+}
+
+/// Envoie une touche ou combinaison (Escape, Return, Tab, cmd+a, shift+tab...).
+/// Mapping keycode + modifieurs copiés de cua-driver keyboard.rs
+/// (`key_name_to_code` + `modifier_flags`).
+fn key_at(combo: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    // Parse "cmd+a" → modifieurs ["cmd"] + touche "a"
+    let parts: Vec<&str> = combo.split('+').collect();
+    let key = parts.last().unwrap_or(&"escape").to_lowercase();
+    let mut flags = CGEventFlags::CGEventFlagNull;
+    for m in &parts[..parts.len().saturating_sub(1)] {
+        match m.to_lowercase().as_str() {
+            "cmd" | "command" => flags |= CGEventFlags::CGEventFlagCommand,
+            "shift" => flags |= CGEventFlags::CGEventFlagShift,
+            "option" | "alt" => flags |= CGEventFlags::CGEventFlagAlternate,
+            "ctrl" | "control" => flags |= CGEventFlags::CGEventFlagControl,
+            "fn" => flags |= CGEventFlags::CGEventFlagSecondaryFn,
+            _ => eprintln!("⚠️ modifieur inconnu: « {} »", m),
+        }
+    }
+
+    // Lettres/chiffres → keycode via un mini-mapping (pattern cua : key_name_to_code
+    // utilise le keycode physique pour les touches spéciales, et les lettres via
+    // le mapping clavier).
+    let code: u16 = match key.as_str() {
+        "a" => 0, "s" => 1, "d" => 2, "f" => 3, "h" => 4, "g" => 5, "z" => 6,
+        "x" => 7, "c" => 8, "v" => 9, "b" => 11, "q" => 12, "w" => 13, "e" => 14,
+        "r" => 15, "y" => 16, "t" => 17, "1" => 18, "2" => 19, "3" => 20, "4" => 21,
+        "6" => 22, "5" => 23, "=" => 24, "9" => 25, "7" => 26, "-" => 27, "8" => 28,
+        "0" => 29, "]" => 30, "o" => 31, "u" => 32, "[" => 33, "i" => 34, "p" => 35,
+        "l" => 37, "j" => 38, "'" => 39, "k" => 40, ";" => 41, "\\" => 42, "," => 43,
+        "/" => 44, "n" => 45, "m" => 46, "." => 47, " " => 49,
+        "return" | "enter" => 36,
+        "tab" => 48,
+        "space" => 49,
+        "delete" | "backspace" => 51,
+        "escape" | "esc" => 53,
+        "command" | "cmd" => 55,
+        "shift" => 56,
+        "capslock" => 57,
+        "option" | "alt" => 58,
+        "control" | "ctrl" => 59,
+        "fn" => 63,
+        "home" => 115,
+        "pageup" => 116,
+        "del" | "forward_delete" => 117,
+        "end" => 119,
+        "pagedown" => 121,
+        "left" | "left_arrow" => 123,
+        "right" | "right_arrow" => 124,
+        "down" | "down_arrow" => 125,
+        "up" | "up_arrow" => 126,
+        _ => {
+            eprintln!("⚠️ touche inconnue: « {} »", key);
+            return Ok(());
+        }
+    };
+
+    let src = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|e| format!("CGEventSource: {:?}", e))?;
+    let down = CGEvent::new_keyboard_event(src.clone(), code, true)
+        .map_err(|_| "key down failed")?;
+    down.set_flags(flags);
+    if let Some(pid) = pgrep_first("Safari") {
+        unsafe {
+            if !skylight::post_to_pid(pid, &*down as *const _ as *mut std::ffi::c_void, true) {
+                down.post(CGEventTapLocation::HID);
+            }
+        }
+    } else {
+        down.post(CGEventTapLocation::HID);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(8));
+    let up = CGEvent::new_keyboard_event(src.clone(), code, false)
+        .map_err(|_| "key up failed")?;
+    up.set_flags(flags);
+    if let Some(pid) = pgrep_first("Safari") {
+        unsafe {
+            if !skylight::post_to_pid(pid, &*up as *const _ as *mut std::ffi::c_void, true) {
+                up.post(CGEventTapLocation::HID);
+            }
+        }
+    } else {
+        up.post(CGEventTapLocation::HID);
+    }
+    println!("🔑 Combinaison « {} » (keycode {})", combo, code);
     Ok(())
 }
 

@@ -159,6 +159,57 @@ maintenu + mouvement).
 
 ---
 
+## Leçon 7 : le clavier n'est PAS accepté par Safari sans l'auth SkyLight
+
+`CGEvent::post_to_pid` (API publique) fonctionne pour les clics (parfois) mais
+**jamais pour le clavier** dans Safari/Chrome : les frappes synthétiques sans
+`SLSEventAuthenticationMessage` sont ignorées silencieusement.
+
+**Solution** (module `skylight` dans main.rs, copié de cua-driver) :
+- `dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight")`
+- `dlsym(RTLD_DEFAULT, "SLEventPostToPid")` — poste au PID via le chemin
+  `SLEventPostToPSN → IOHIDPostEvent` que Chromium/Catalyst acceptent
+- `dlsym(..., "SLEventSetAuthenticationMessage")` + classe ObjC
+  `SLSEventAuthenticationMessage` via `messageWithEventRecord:pid:version:`
+  (vérifier `class_respondsToSelector`, ajouté en macOS 15)
+- Attacher le message auth AVANT `SLEventPostToPid`
+
+**Preuve** : `--type "github.com/new"` après un clic trusted → l'URL de la barre
+d'adresse est remplacée (lue par AX). Avec les API publiques, rien ne bougeait.
+
+---
+
+## Leçon 8 : la SOURIS doit aussi passer par SLEventPostToPid pour le chrome Safari
+
+Un clic `CGEvent::post(HID)` ou `post_to_pid` public ne sélectionne PAS l'URL
+dans la barre d'adresse Safari (le clic est "untrusted" pour le chrome).
+Seul `SLEventPostToPid(pid, event, attach_auth=false)` (la souris n'a pas besoin
+d'auth, seuls les événements clavier en ont) sélectionne réellement le texte.
+
+**Preuve** : `--clickpid 825 63 40423` → l'URL devient BLEUE (vérifié par vision).
+C'est le même warp + click state, mais posté par SkyLight.
+
+---
+
+## Leçon 9 : le pont AX exige snapshot_id (sinon snapshot_id_required)
+
+`cua-driver call click` avec `element_index` SEUL échoue :
+`{"code": "snapshot_id_required"}`. Il faut :
+1. `get_window_state` → récupérer `snapshot_id` + `elements[]`
+2. `click` avec `element_index` + `snapshot_id` + session scope **window**
+   (le scope desktop refuse le chemin AX : `window_scope_disabled`)
+
+---
+
+## Leçon 10 : set_value AX = le remplissage fiable des champs chrome
+
+Pour la barre d'adresse Safari (chrome, pas web content), ni le clic AX ni le
+clic pixel ne fonctionnent de façon fiable pour mettre le focus + écrire.
+**`set_value` avec `element_token`** (ex: `s00000065:190`) fonctionne :
+`effect: confirmed` + `route: accessibility` + preuve `value_readback`.
+
+---
+
 ## Règle d'or finale
 
 **ŒIL → MAIN → VÉRIFICATION → APPRENTISSAGE** :

@@ -74,12 +74,30 @@ Notre binaire n'a pas Accessibilité → pour les champs vides, `--axclick` dél
 ```
 $ ecran-live --axclick Safari "Description"
 🔌 AX direct indisponible — pont vers cua-driver...
-🔌 PONT cua: élément [44] « Description »
-✅ Clic cua effectué sur « Description » (élément 44)
+🔌 PONT cua: élément [64] « Description » (snapshot s0000004e)
+✅ Clic cua AX sur « Description » (élément 64, route accessibility)
 ```
 
 Prérequis : `cua-driver` installé + `permissions grant` fait (Accessibilité ✅).
-Le pont utilise `get_window_state` (qui exige **pid + window_id**, pas juste pid !) puis `click` par `element_index` — le chemin AX le plus fiable.
+Le pont utilise `get_window_state` (qui exige **pid + window_id**, pas juste pid !) puis `click` par `element_index` + **`snapshot_id`** — le chemin AX le plus fiable. **Sans le `snapshot_id`, le clic AX échoue avec `snapshot_id_required`** : c'est la leçon la plus subtile du pont.
+
+### 4bis. Le clavier TRUSTED : SLEventPostToPid (la découverte majeure)
+
+**Le problème** : `CGEvent::post_to_pid` (API publique) n'est **pas accepté** par Safari/Chrome pour le clavier — les frappes synthétiques sans message d'authentification sont ignorées (les champs web restent vides).
+
+**La solution** (copiée de cua-driver, module `skylight`) : l'API privée SkyLight :
+
+1. **`SLEventPostToPid`** — poste l'événement au PID via `SLEventPostToPSN` → `IOHIDPostEvent` (le chemin que Chromium/Catalyst acceptent comme input live). La souris aussi doit passer par là pour être "trusted" sur le chrome Safari (clic dans la barre d'adresse).
+2. **`SLSEventAuthenticationMessage`** (macOS 14+) — construit via ObjC `messageWithEventRecord:pid:version:` et attaché avec `SLEventSetAuthenticationMessage` avant le post.
+
+Notre module `skylight` résout tout via `dlopen(SkyLight)` + `dlsym` (pas de lien statique, pas de crash si l'API change) :
+
+```
+$ ecran-live --clickpid 825 63 40423   # clic TRUSTED (warp + SLEventPostToPid)
+$ ecran-live --type "github.com/new"   # clavier TRUSTED (keycode 0 + Unicode + auth)
+```
+
+**Preuve de fonctionnement** : clic → l'URL de la barre d'adresse devient BLEUE (sélectionnée) ; type → l'URL est remplacée par « github.com/new » (vérifié par lecture AX). Impossible avec les API publiques.
 
 ### 5. Un modal ouvert intercepte les clics
 
@@ -124,11 +142,16 @@ Sur 8 Go de RAM, si la mémoire tombe sous ~20 % libre, le chargement du modèle
 | `ecran-live --locate 1600 "texte"` | **Grounding** : localise un texte → coordonnées réelles |
 | `ecran-live --click 1600 "texte"` | **Grounding + clic gauche** : localise, remappe puis clique |
 | `ecran-live --clickxy X Y` | **Clic direct** par coordonnées ÉCRAN RÉEL (nos yeux trouvent → on clique) |
+| `ecran-live --clickpid X Y PID` | **Clic TRUSTED** : warp + SLEventPostToPid vers un PID (fonctionne sur le chrome Safari) |
 | `ecran-live --rightclick 1600 "texte"` | **Clic droit** : menu contextuel sur l'élément |
 | `ecran-live --doubleclick 1600 "texte"` | **Double-clic** : ouvre/active l'élément |
 | `ecran-live --scroll 1600 "texte" N` | **Scroll** : déplace la souris sur l'élément puis scrolle N lignes |
-| `ecran-live --axclick Safari "Description"` | **Clic AX** : trouve le champ par son label (même VIDE) — pont cua si pas de permission |
-| `ecran-live --marker X Y [ms]` | **Marqueur rose** : affiche un cercle à (X,Y) — la "souris colorée" façon cua |
+| `ecran-live --axclick Safari "label"` | **Clic AX** : pont cua-driver (snapshot_id) pour champs vides |
+| `ecran-live --type "texte"` | **Clavier TRUSTED** : SLEventPostToPid + auth (fonctionne dans Safari) |
+| `ecran-live --typehid "texte"` | **Clavier HID** : poste au système (l'app active reçoit) |
+| `ecran-live --key return` | **Touche spéciale** : return/escape/tab/flèches (skylight trusted) |
+| `ecran-live --mousepos` | **Vérité terrain** : position réelle du curseur |
+| `ecran-live --marker X Y ms` | **Marqueur rose** : affiche un carré coloré (test du curseur visible) |
 
 ---
 

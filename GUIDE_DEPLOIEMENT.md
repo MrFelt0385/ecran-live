@@ -10,7 +10,7 @@ Copiez-collez les blocs dans l'ordre.
 ```bash
 # Build
 cd ~/Projects/ecran-live
-cargo build --release
+cargo build --release          # dépendances: libc, foreign-types, tiny-skia, objc
 cp target/release/ecran-live /Applications/ecran-live
 
 # PERMISSIONS — CRITIQUE (sinon Ax(-25211) ou capture noire)
@@ -19,6 +19,11 @@ cp target/release/ecran-live /Applications/ecran-live
 # 3. Capture d'écran → [+] → ajoutez /Applications/ecran-live (cochez)
 # NOTE : après chaque rebuild (nouveau cdhash), macOS révoque → recommencez.
 #   tccutil reset ScreenCapture com.nousresearch.hermes
+
+# VÉRIFICATION RAPIDE (souris + clavier TRUSTED)
+/Applications/ecran-live --mousepos                        # position réelle du curseur
+/Applications/ecran-live --clickpid 825 63 40423          # clic TRUSTED (SLEventPostToPid)
+/Applications/ecran-live --type "test"                    # clavier TRUSTED (auth SkyLight)
 ```
 
 ## 2. Serveur vision mlxcel (5 min)
