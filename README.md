@@ -106,6 +106,7 @@ Sur 8 Go de RAM, si la mémoire tombe sous ~20 % libre, le chargement du modèle
 |---|---|
 | `ecran-live 1600` | Capture simple (PNG sans perte, ~/ecran-live.png) |
 | `ecran-live --ocr 1600` | **OCR complet** : textes + bounding boxes (JSON) via ocrs |
+| `ecran-live --ocr 1600 --json` | **OCR en JSON brut** : sortie machine-parseable (pour scripts) |
 | `ecran-live --zoom 1200` | Vision globale + grille fine (2x2 défaut, `--grid 3 2`) |
 | `ecran-live --salient 1200 --top 3` | Saillance contraste : texte, boutons, bordures |
 | `ecran-live --salient-color 1200` | Saillance couleur : icônes, alertes, éléments saturés |
@@ -113,6 +114,8 @@ Sur 8 Go de RAM, si la mémoire tombe sous ~20 % libre, le chargement du modèle
 | `ecran-live --attention 1200` | **Carte d'attention combinée** : fusion des 3 canaux |
 | `ecran-live --deep 1200 --depth 3` | **Zoom itératif** : re-zoom tant que des détails fins restent |
 | `ecran-live --uizoomer 1200` | **Zoom conditionnel** : ne zoome que si le modèle est incertain |
+| `ecran-live --track` | **Position souris** : affiche la position actuelle du curseur (CGEventGetLocation) |
+| `ecran-live --watch [secs] [width]` | **Mode flux** : capture toutes les N secondes dans un fichier |
 
 ### Actions (nos mains)
 
