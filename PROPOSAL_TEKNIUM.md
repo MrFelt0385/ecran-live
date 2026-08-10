@@ -59,6 +59,7 @@ ou ici même). Merci pour Hermes, qui est devenu notre agent quotidien !
   de performance (mlxcel 4-bit, VLM prefix cache, coordinate priming, benchmarks) et
   documentation complète. Un duo humain + IA qui prouve ce qu'une collaboration
   symbiotique peut produire.
+  Développé avec **Hermes Agent**, vision par **mlxcel + LiquidAI/LFM2.5-VL-1.6B-4bit**.
 
 ---
 
