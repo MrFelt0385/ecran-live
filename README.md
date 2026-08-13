@@ -217,6 +217,8 @@ MIT — voir [LICENSE](LICENSE).
 
 ## 🙏 Crédits
 
+- **François Bernabé** — vision du projet, exigences, tests sur le terrain
+  - ORCID iD : [0009-0000-1482-3137](https://orcid.org/0009-0000-1482-3137) (@MrFelt0385)
 - **Sypherine** — architecture, optimisations, tests, documentation
 - **Hermes Agent** (Nous Research) — framework de développement
 - **mlxcel** — serveur VLM Rust + MLX C++
