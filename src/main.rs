@@ -741,6 +741,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("   zone {} : x={}, y={}, {}x{}", i + 1, z.x, z.y, z.w, z.h);
             }
         }
+        // ecran-live --veille [largeur] [secondes] [question]
+        //   VISION PRÉDICTIVE (biomimétique, 13/08) — le cerveau ne traite
+        //   que l'ERREUR DE PRÉDICTION (predictive coding) :
+        //   1. Capture frame N → analyse VLM (la prédiction du monde)
+        //   2. Capture frame N+1 → diff pixels (0.05s) → bbox du changement
+        //   3. Si immobile → rien (économie totale, RAM stable)
+        //   4. Si changement → VLM UNIQUEMENT sur le bbox changé (~0.5s)
+        //   + INHIBITION DE RETOUR : ne jamais re-analyser une zone identique.
+        "--veille" => {
+            let cap = Capteur::new()?;
+            let veille_w: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1600);
+            let secondes: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
+            let question = args.get(3).cloned()
+                .unwrap_or_else(|| "Que s'est-il passé à l'écran ? Réponds en une phrase.".to_string());
+            let h = (veille_w as f64 * cap.ratio).round() as u32;
+            let mut prev: Option<Vec<u8>> = None;
+            let mut derniere_analyse = std::time::Instant::now() - std::time::Duration::from_secs(2);
+            let debut = std::time::Instant::now();
+            let mut tours = 0u64;
+            let mut analyses = 0u64;
+
+            println!("👁️  Veille prédictive — {}s, capture {}x{}, réaction aux changements", secondes, veille_w, h);
+            while debut.elapsed().as_secs() < secondes {
+                tours += 1;
+                let png = cap.capture_bytes(veille_w, h)?;
+                if let Some(prev_bytes) = &prev {
+                    match analyse::diff_bbox(prev_bytes, &png, 30)? {
+                        None => {
+                            println!("   [t{}] immobile — aucune analyse", tours);
+                        }
+                        Some((x0, y0, x1, y1, pct)) => {
+                            // Marge autour du bbox (contexte visuel)
+                            let m = 30u32;
+                            let cx0 = x0.saturating_sub(m);
+                            let cy0 = y0.saturating_sub(m);
+                            let cx1 = (x1 + m).min(veille_w);
+                            let cy1 = (y1 + m).min(h);
+                            // Évite les micro-changements (<0.05% de l'écran :
+                            // curseur, animations subtiles — le cerveau les ignore)
+                            if pct < 0.05 {
+                                println!("   [t{}] micro-changement ({:.3}%) ignoré (inhibition)", tours, pct);
+                            } else {
+                                // VLM sur la zone CHANGÉE seulement (predictive coding)
+                                let crop = analyse::crop_bytes_png(&png, cx0, cy0, cx1, cy1, 1)?;
+                                let t0 = std::time::Instant::now();
+                                let reponse = analyze_image(&crop, &question)?;
+                                analyses += 1;
+                                println!("   [t{}] CHANGEMENT {:.2}% bbox=({},{})-({},{}) → {:.2}s | {}", tours, pct, cx0, cy0, cx1, cy1, t0.elapsed().as_secs_f64(), reponse);
+                            }
+                        }
+                    }
+                } else {
+                    // Première frame : analyse complète (la prédiction initiale)
+                    let t0 = std::time::Instant::now();
+                    let reponse = analyze_image(&png, &question)?;
+                    analyses += 1;
+                    println!("   [t{}] état initial → {:.2}s | {}", tours, t0.elapsed().as_secs_f64(), reponse);
+                }
+                prev = Some(png);
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            println!("⏱️  Veille terminée : {} tours, {} analyses VLM, {} économisées",
+                tours, analyses, tours.saturating_sub(analyses));
+        }
         "--ocr" => {
             let cap = Capteur::new()?;
             println!("Mode OCR : extraction des textes + bounding boxes (coordinate priming)");
