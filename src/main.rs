@@ -2365,7 +2365,7 @@ fn analyze_image_mt(png_bytes: &[u8], question: &str, max_tokens: u32) -> Result
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes);
     let payload = serde_json::json!({
-        "model": "LFM2.5-VL-1.6B-4bit",
+        "model": "LFM2.5-VL-3B-MLX-4bit",
         "messages": [{
             "role": "user",
             "content": [
@@ -2396,7 +2396,7 @@ fn analyze_image_mt(png_bytes: &[u8], question: &str, max_tokens: u32) -> Result
 /// suivant coûte ~0.6s au lieu de ~2.2s (cached≈277/297, mesuré).
 fn analyze_conversation(messages: serde_json::Value) -> Result<String, String> {
     let payload = serde_json::json!({
-        "model": "LFM2.5-VL-1.6B-4bit",
+        "model": "LFM2.5-VL-3B-MLX-4bit",
         "messages": messages,
         "max_tokens": 100,
         "temperature": 0

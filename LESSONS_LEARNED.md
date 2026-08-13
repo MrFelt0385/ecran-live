@@ -257,6 +257,60 @@ l'arbre par label (title/description/value) quand la cible a un texte connu.
 
 ---
 
+## Leçon 12 : max_tokens = le levier de latence VLM (6s → 1s)
+
+**Le symptôme** : une analyse VLM « à chaud » prenait 6s, quel que soit le
+modèle (1.6B ou 3B), même sur une petite image.
+
+**La cause** (logs serveur) : le VLM génère à ~30 tok/s. Avec `max_tokens: 100`
+par défaut, le modèle écrit une réponse de 100+ tokens = **3.3s de génération**
++ le prefill image (~2-3s) = 6s. La réponse n'est PAS limitée par la question.
+
+**Le fix** : `max_tokens: 24` par défaut (`analyze_image_mt`) :
+- réponses courtes (oui/non, nombre, un mot, une phrase) = **~1s à chaud**
+- descriptions détaillées = passer `analyze_image_mt(png, q, 300)` explicitement
+
+**Tableau mesuré** (même image complexe, à chaud) :
+
+| max_tokens | Latence | Usage |
+|---|---|---|
+| 100 | 6.0s | descriptions détaillées |
+| 40 | 3.1s | moyen |
+| **24** | **~1.0-1.3s** | **par défaut (rapide)** |
+
+**Leçon** : avant d'optimiser le modèle (quantization, cache), vérifier ce que
+le serveur génère réellement. Le goulot était la LONGUEUR de la réponse, pas
+le préfill.
+
+---
+
+## Leçon 13 : le vision tower domine — cibler les zones (écran 6s → crop 1s)
+
+**Le symptôme** : l'écran complet au VLM coûte ~6s (157 tokens prompt), un
+crop 120×70 coûte ~1s (90 tokens) — mais un crop 128×115 « complexe » coûte
+encore 6s avec max_tokens 100.
+
+**Les données** (logs mlxcel `prompt-cache: request completed`) :
+
+| Image | Tokens prompt | Temps (max_tokens 100) |
+|---|---|---|
+| Écran complet 512px | 157 | 6.1s |
+| Crop 128×115 complexe | 86-90 | 6.0s (réponse longue) |
+| Crop 120×70 (HUD) | 90 | 1.6s → 0.9s (réponse courte) |
+
+**Leçon** : le coût = prefill (patches d'image via le vision tower) + génération
+(réponse). Deux leviers complémentaires :
+1. **max_tokens court** (leçon 12) → tue la génération longue
+2. **crops réduits à 128px** avant envoi (dans `zoom_zones`) → réduit le prefill
+
+**Le pipeline `--scan`** : capture → saillance pixel native (0.02s) → crops
+réduits → VLM court = **~1.2s total** (5× plus rapide que l'écran complet).
+
+**Autres optimisations** : `--kv-quant-scheme turboquant --kv-bits 4` (KV cache
+compressé, RAM libre 69%), `--parallel 2` (2 analyses VLM simultanées).
+
+---
+
 ## Règle d'or finale
 
 **ŒIL → MAIN → VÉRIFICATION → APPRENTISSAGE** :

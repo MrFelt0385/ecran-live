@@ -25,7 +25,7 @@ lire les détails fins.
 ```
 ┌──────────────────────────────────────────────────────────┐
 │ 1. CAPTURE PNG sans perte (en mémoire, zéro fichier)      │
-│ 2. ANALYSE PIXEL NATIVE (Rust, 0.03s)                     │
+│ 2. ANALYSE PIXEL NATIVE (Rust, 0.023s)                    │
 │    • clusters de couleur + centroïdes                     │
 │    • diff + bbox (détection de changement)                │
 │    • cartes d'attention (contraste + couleur + mouvement) │
@@ -37,7 +37,7 @@ lire les détails fins.
 │    • découpage en zones → threads indépendants → VLM      │
 │    • collecte ordonnée des résultats                      │
 │ 5. COMPRÉHENSION DE SCÈNE (--vlm / --conv / --palais)     │
-│    • VLM local 512px (2.2s à chaud, prefix-cache)         │
+│    • VLM local 512px (~1s à chaud, max_tokens 24)         │
 │    • grounding d'objets par requête (RefCOCO 87.9)        │
 │    • mémoire spatiale persistante (~/palais)              │
 └──────────────────────────────────────────────────────────┘
@@ -47,7 +47,7 @@ lire les détails fins.
 
 | Pilier | Mode | Description |
 |---|---|---|
-| **Analyse pixel native** | `--analyse` | Clusters de couleur, centroïdes, détection de cibles — **0.03s** |
+| **Analyse pixel native** | `--analyse` | Clusters de couleur, centroïdes, détection de cibles — **0.023s** |
 | **Détection de changement** | `--diff` | Diff pixel + bbox — savoir ce qui a bougé à l'écran |
 | **Attention visuelle** | `--attention` | Carte d'attention (contraste + couleur + mouvement) |
 | **Saillance** | `--salient` | Zones saillantes par couleur / mouvement, zoom 2x2 |
@@ -82,7 +82,8 @@ ecran-live --deep 3 2   # grille 3x2, 6 zones analysées en parallèle
 
 ### 🧠 Compréhension de scène
 
-- `--vlm` — description de scène (512px, 2.2s à chaud avec le 3B-4bit)
+- `--vlm` — description de scène (512px, ~1s à chaud avec le 3B-4bit, max_tokens 24)
+- `--scan` — **boucle rapide** : saillance pixels (0.02s) → crops réduits 128px → VLM court (~1.2s total)
 - `--conv` — conversation multi-tours avec le VLM (cache KV)
 - `--palais` — **mémoire spatiale persistante** : le modèle se souvient de ce
   qu'il a vu et où (références croisées entre sessions)
@@ -141,7 +142,7 @@ interactif par son rôle + label + bounds, puis on déclenche `AXPress`
 | Modèle | Footprint | Latence chaude | Disque |
 |---|---|---|---|
 | LFM2.5-VL-1.6B-4bit | 1.7 Go | 1.3s | 1.4 GB |
-| **LFM2.5-VL-3B-4bit** | **2.8 Go** | **1.9s** | **2.2 GB** |
+| **LFM2.5-VL-3B-4bit** | **2.8 Go** | **~1.0s** | **2.2 GB** |
 
 Le 3B apporte le **grounding** (RefCOCO 87.9) et la **compréhension d'écran**
 (ScreenSpot-v2 82.2 web) — pour +1.1 Go de RAM seulement.
@@ -194,7 +195,8 @@ curl -sL -o model.safetensors \
 ./target/release/mlxcel-server \
   -m models/LFM2.5-VL-3B-MLX-4bit \
   --port 8085 --host 127.0.0.1 \
-  --parallel 1 -c 2048 --enable-vlm-prefix-cache
+  --parallel 2 -c 2048 --enable-vlm-prefix-cache \
+  --kv-quant-scheme turboquant --kv-bits 4
 ```
 
 ### 4. Utilisation — la vision d'abord
@@ -214,6 +216,9 @@ ecran-live --vlm screenshot.png "Que montre cette image ?"
 
 # VISION : localisation par grounding (3B)
 ecran-live --vlm screenshot.png "Localise le bouton jaune. [xmin,ymin,xmax,ymax]"
+
+# VISION : boucle rapide (saillance → crops → VLM, ~1.2s)
+ecran-live --scan 1600 2 "Que voit-on ?"
 
 # VISION : les yeux toujours ouverts
 ecran-live --stream 2 1600
@@ -245,7 +250,8 @@ ecran-live --clic-ax-label <pid> CLIQUE
 ### Vision VLM (local, Metal)
 | Mode | Description |
 |---|---|
-| `--vlm` | Compréhension de scène (défaut 512px) |
+| `--vlm` | Compréhension de scène (défaut 512px, max_tokens 24 → ~1s) |
+| `--scan` | **Boucle rapide** : saillance pixels → crops réduits 128px → VLM (~1.2s) |
 | `--conv` | Conversation multi-tours (cache KV) |
 | `--vlmzone` | Crop + zoom 3× avant VLM |
 | `--grille` | Grille N×N pour localisation grossière |
