@@ -961,19 +961,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tours, analyses, habitudes, anticipations, deltas_connus, seuil_inhibition);
         }
         // ecran-live --blob [largeur] [secondes] [question]
-        //   LE BLOB-ESPION INFORMATEUR (Physarum polycephalum, biomimétique) :
-        //   son but = OPTIMISER LES REQUÊTES pour gagner en rapidité d'échange.
-        //   Physarum explore en continu GRATUITEMENT (pixels) et ne "digère"
-        //   (VLM, coûteux 3-5s) QUE la nourriture qui en vaut la peine.
+        //   LE BLOB-RÉSEAU (Physarum polycephalum, biomimétique) :
+        //   comme le réseau de veines du blob — les veines où passe la
+        //   nourriture deviennent ÉPAISSES (débit ↑), les inutilisées
+        //   s'ATROPHIENT (débit ↓). Ici : l'écran est divisé en zones,
+        //   chaque zone a un SCORE DE PASSAGE (activité mesurée par les
+        //   pixels). Les zones actives reçoivent PLUS de requêtes VLM
+        //   (débit ↑), les zones calmes MOINS (débit ↓) → la RAM et les
+        //   requêtes s'allouent dynamiquement selon le contexte réel.
         //   Pipeline :
-        //   1. EXPLORE continu : pixels (0.05s) → où bouge ? bbox + %
-        //   2. RATE-LIMIT : max 1 requête VLM / intervalle (le temps d'une
-        //      requête) — sinon on suit par PIXELS (gratuit)
-        //   3. SUIT par pixels entre 2 requêtes : rapporte "même objet,
-        //      maintenant à (x,y), direction →" — 0 requête
-        //   4. OBSERVE (VLM) seulement si : nouvel objet / zone changée /
-        //      intervalle écoulé → "il se passe X à (x,y)"
-        //   => même information avec 3-4× moins de requêtes VLM
+        //   1. GRILLE : découpe l'écran en G×G zones (défaut 3×3)
+        //   2. MESURE : diff entrelacé → incrémente le score de la zone
+        //      où il y a du mouvement (le "passage" de nourriture)
+        //   3. ADAPTE : les zones chaudes sont analysées souvent (débit
+        //      élevé), les tièdes moins, les froides jamais (atrophie)
+        //   4. RAPPORTE : "il se passe X à (zone chaud, x,y)" + direction
         "--blob" => {
             let cap = Capteur::new()?;
             let blob_w: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1600);
@@ -985,22 +987,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut tours = 0u64;
             let mut analyses = 0u64;
             let mut suivis = 0u64;
-            let mut dernier_pos: Option<(u32, u32)> = None;
             let mut phase_entrelace: u32 = 0;
             let mut prev: Option<Vec<u8>> = None;
-            let mut trajectoire: Vec<(u32, u32)> = Vec::new();
             let mut derniere_requete = std::time::Instant::now() - std::time::Duration::from_secs(10);
-            let mut description_courante = String::new();
-            // Intervalle minimum entre 2 requêtes VLM (le temps d'une requête
-            // chaude ~2-3s + marge) — c'est LE levier de rapidité d'échange
-            let intervalle = std::time::Duration::from_secs(6);
+            // GRILLE : 3×3 zones — chaque zone a un SCORE DE PASSAGE
+            // (combien de fois le blob y a vu du mouvement). Les zones
+            // chaudes → débit élevé, les froides → atrophie.
+            let (gz, gc) = (3usize, 3usize); // grille 3×3
+            let mut scores = vec![0u32; gz * gc];
+            // Le score décroît avec le temps (une zone qui se calme
+            // redevient froide — l'atrophie des veines)
+            let mut description_par_zone_idx: Vec<Option<String>> = vec![None; gz * gc];
 
-            println!("🕵️  BLOB-ESPION INFORMATEUR — {}s, requêtes optimisées (max 1/{}s), observe et informe", secondes, intervalle.as_secs());
+            println!("🕵️  BLOB-RÉSEAU — {}s, grille {}×{} zones, débit adaptatif (veines épaisses où ça passe)", secondes, gz, gc);
             while debut.elapsed().as_secs() < secondes {
                 tours += 1;
                 let png = cap.capture_bytes(blob_w, h)?;
 
-                // 1) EXPLORE : où ça bouge ? (diff entrelacé → bbox)
+                // 1) MESURE : diff entrelacé → bbox du mouvement
                 let mouvement = if let Some(p) = &prev {
                     analyse::diff_bbox_entrelace(p, &png, 30, 3, phase_entrelace)?
                 } else { None };
@@ -1008,27 +1012,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some((x0, y0, x1, y1, pct)) = mouvement {
                     let cx = (x0 + x1) / 2;
                     let cy = (y0 + y1) / 2;
-                    dernier_pos = Some((cx, cy));
-                    trajectoire.push((cx, cy));
-                    if trajectoire.len() > 5 { trajectoire.remove(0); }
-                    let dir = if trajectoire.len() >= 2 {
-                        let (ax, ay) = trajectoire[trajectoire.len() - 2];
-                        let (bx, by) = trajectoire[trajectoire.len() - 1];
-                        let (dx, dy) = (bx as i64 - ax as i64, by as i64 - ay as i64);
-                        if dx.abs() > dy.abs() {
-                            if dx > 0 { "→ droite" } else { "← gauche" }
-                        } else {
-                            if dy > 0 { "↓ bas" } else { "↑ haut" }
-                        }
-                    } else { "" };
+                    // Quelle zone de la grille ? (le "passage" du blob)
+                    let zx = ((cx as f64 / blob_w as f64) * gc as f64).min((gc - 1) as f64) as usize;
+                    let zy = ((cy as f64 / h as f64) * gz as f64).min((gz - 1) as f64) as usize;
+                    let zi = zy * gc + zx;
+                    // 2) ADAPTE : renforce la veine (score ↑)
+                    scores[zi] = scores[zi].saturating_add(1).min(100);
 
-                    // 2+3) RATE-LIMIT : le VLM est coûteux → on ne l'appelle
-                    // que si l'intervalle est écoulé. Sinon : SUIVI pixels
-                    // (gratuit) + rapport position/direction.
+                    // Débit adaptatif : intervalle selon le score de la zone
+                    // (chaude = 3s, tiède = 6s, froide = jamais)
+                    let debit_s = if scores[zi] >= 5 { 3 } else if scores[zi] >= 2 { 6 } else { 15 };
+                    let intervalle = std::time::Duration::from_secs(debit_s);
                     let intervalle_ecoule = derniere_requete.elapsed() >= intervalle;
-                    let nouvel_objet = description_courante.is_empty();
-                    if intervalle_ecoule || nouvel_objet {
-                        // 4) OBSERVE : VLM sur la zone (contexte 2×)
+                    let jamais_analyse = description_par_zone_idx[zi].is_none();
+
+                    if intervalle_ecoule || jamais_analyse {
+                        // 3) ANALYSE (débit élevé sur la veine épaisse)
                         let bw = (x1 - x0).max(1);
                         let bh = (y1 - y0).max(1);
                         let m = bw.max(bh).max(30) * 2;
@@ -1041,31 +1040,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let reponse = analyze_image(&crop, &question)?;
                         analyses += 1;
                         derniere_requete = std::time::Instant::now();
-                        description_courante = reponse.clone();
-                        println!("   [t{}] 🕵️  RAPPORT à ({},{}) → {:.2}s | {} | {}", tours, cx, cy, t0.elapsed().as_secs_f64(), reponse, dir);
+                        description_par_zone_idx[zi] = Some(reponse.clone());
+                        println!("   [t{}] 🕵️  VEINE ÉPAISSE zone[{},{}] score={} (débit {}s) → {:.2}s | {}", tours, zx, zy, scores[zi], debit_s, t0.elapsed().as_secs_f64(), reponse);
                     } else {
-                        // SUIVI gratuit : même objet, on rapporte sa position
+                        // 4) SUIVI gratuit (0 requête — la veine est fine ici)
                         suivis += 1;
-                        println!("   [t{}] 🕵️  SUIT à ({},{}) {} (0 requête — rate-limit) | {}", tours, cx, cy, dir, description_courante);
+                        let desc = description_par_zone_idx[zi].as_deref().unwrap_or("—");
+                        println!("   [t{}] 🕵️  VEINE FINE zone[{},{}] score={} (0 requête — atrophie) | {}", tours, zx, zy, scores[zi], desc);
                     }
                 } else {
-                    // RÉTRACTE / REPOS
-                    if dernier_pos.is_some() {
-                        suivis += 1;
-                        println!("   [t{}] 🕵️  CALME — plus de mouvement (0 requête), dernier à {:?}", tours, dernier_pos);
-                        dernier_pos = None;
-                        trajectoire.clear();
-                        description_courante.clear();
-                    } else {
-                        println!("   [t{}] 🕵️  calme — rien à signaler (0 requête)", tours);
+                    // CALME : toutes les veines s'atrophient (score décroît)
+                    for s in scores.iter_mut() {
+                        if *s > 0 { *s -= 1; }
                     }
+                    println!("   [t{}] 🕵️  calme — veines s'atrophient (0 requête)", tours);
                 }
                 prev = Some(png);
                 phase_entrelace = (phase_entrelace + 1) % 3;
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
-            println!("⏱️  BLOB-ESPION terminé : {} tours | {} requêtes VLM | {} suivis pixels | dernière zone {:?} | économie {} requêtes évitées",
-                tours, analyses, suivis, dernier_pos, suivis.saturating_sub(analyses));
+            // Bilan des veines (carte thermique du trafic)
+            println!("⏱️  BLOB-RÉSEAU terminé : {} tours | {} requêtes VLM | {} suivis | carte des veines :", tours, analyses, suivis);
+            for y in 0..gz {
+                let mut ligne = String::from("     ");
+                for x in 0..gc {
+                    let s = scores[y * gc + x];
+                    ligne.push_str(&format!("[{:>3}] ", s));
+                }
+                println!("{}", ligne);
+            }
         }
         // ecran-live --blob-test <dossier> [question]
         //   BLOB-ESPION EN MODE TEST : lit les frames PNG d'un dossier
