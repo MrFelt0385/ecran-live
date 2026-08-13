@@ -118,23 +118,29 @@ interactif par son rôle + label + bounds, puis on déclenche `AXPress`
 
 ---
 
-## ⚡ Benchmarks (Mac mini M1, 8 Go)
+## ⚡ Benchmarks (Mac mini M1, 8 Go — mesurés 13/08)
 
 | Composant | Valeur |
 |---|---|
-| **Analyse pixel native** | **0.03s** |
-| Capture + analyse complète | **0.36s** |
-| **VLM 512px à chaud (3B-4bit)** | **2.2s** |
-| Cycle vision complet (capture→analyse→compréhension) | **~3s** |
+| **Analyse pixel native** | **0.023s** |
+| **VLM 512px à chaud (3B-4bit)** | **1.9s** |
+| **VLM sur crop ciblé (120×70)** | **1.1s** |
+| **VLM sur crop ciblé + max 256** | **0.89s** ⚠️ texte dégradé |
+| Cycle vision complet (capture→analyse→compréhension) | **~2.3s** |
 | Footprint VLM 3B-4bit | **2.8 Go** (tient dans 8 Go) |
-| RAM système libre après chargement | **70 %** (seuil critique 11-13 %) |
+| RAM système libre après chargement | **44-68 %** (seuil critique 11-13 %) |
+
+> **Leçon performance** : analyser des **zones ciblées** (crop) plutôt que l'écran
+> complet divise le temps VLM par ~2 à finesse égale. C'est l'architecture
+> `--vlmzone` (crop + zoom 3×) : on scanne large en pixel natif (0.02s), on
+> zoome sur les zones d'intérêt, on ne VLMise que ce qui compte.
 
 ### Comparaison des modèles VLM
 
 | Modèle | Footprint | Latence chaude | Disque |
 |---|---|---|---|
 | LFM2.5-VL-1.6B-4bit | 1.7 Go | 1.3s | 1.4 GB |
-| **LFM2.5-VL-3B-4bit** | **2.8 Go** | **2.2s** | **2.2 GB** |
+| **LFM2.5-VL-3B-4bit** | **2.8 Go** | **1.9s** | **2.2 GB** |
 
 Le 3B apporte le **grounding** (RefCOCO 87.9) et la **compréhension d'écran**
 (ScreenSpot-v2 82.2 web) — pour +1.1 Go de RAM seulement.
