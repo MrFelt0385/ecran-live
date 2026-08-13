@@ -784,6 +784,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut seuil_inhibition: f64 = 0.05;
             let mut micros_vus: u64 = 0;
             let mut reels_vus: u64 = 0;
+            // Vision entrelacée (micro-saccades × TV) : phase qui tourne 0,1,2
+            // → chaque scan ne coûte qu'1/3 du diff, tout l'écran couvert en
+            // 3 tours (comme la rétine qui rafraîchit par petites touches).
+            let mut phase_entrelace: u32 = 0;
 
             let chercher_familier = |empr: &[u8], mem: &[(Vec<u8>, String)]| -> Option<String> {
                 let mut best: Option<(usize, &String)> = None;
@@ -847,9 +851,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                // 2) DIFF : le monde a-t-il changé ?
+                // 2) DIFF ENTRELACÉ : le monde a-t-il changé ? (1/3 du coût,
+                // phase qui tourne → tout couvert en 3 tours, micro-saccades)
                 if let Some(prev_bytes) = &prev {
-                    match analyse::diff_bbox(prev_bytes, &png, 30)? {
+                    match analyse::diff_bbox_entrelace(prev_bytes, &png, 30, 3, phase_entrelace)? {
                         None => {
                             if let Some(reponse) = chercher_familier(&empr, &hippocampe) {
                                 habitudes += 1;
@@ -948,6 +953,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 prev = Some(png);
+                // Micro-saccade : phase suivante de l'entrelacement
+                phase_entrelace = (phase_entrelace + 1) % 3;
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
             println!("⏱️  Cerveau terminé : {} tours | {} analyses VLM | {} habituation | {} anticipations ⚡ | {} deltas connus | seuil inhibition final {:.2}%",

@@ -227,6 +227,55 @@ pub fn diff_bbox(a: &[u8], b: &[u8], seuil_px: i64) -> Result<Option<(u32, u32, 
     Ok(Some((minx, miny, maxx, maxy, pct)))
 }
 
+/// DIFF ENTRELACÉ (micro-saccades × entrelacement TV, biomimétique) :
+/// compare seulement 1 ligne sur `pas` (phase donnée) → 3× plus rapide.
+/// En alternant phase 0,1,2 sur 3 scans, TOUT l'écran est couvert avec un
+/// coût de capture/diff divisé par 3 — comme la rétine qui rafraîchit par
+/// micro-saccades, jamais tout à la fois.
+pub fn diff_bbox_entrelace(
+    a: &[u8],
+    b: &[u8],
+    seuil_px: i64,
+    pas: u32,
+    phase: u32,
+) -> Result<Option<(u32, u32, u32, u32, f64)>, String> {
+    let img_a = image::load_from_memory(a).map_err(|e| format!("image A: {e}"))?;
+    let img_b = image::load_from_memory(b).map_err(|e| format!("image B: {e}"))?;
+    let (w, h) = img_a.dimensions();
+    if img_b.dimensions() != (w, h) {
+        return Err(format!("dimensions différentes {}x{} vs {}x{}", w, h, img_b.width(), img_b.height()));
+    }
+    let a_rgb = img_a.to_rgb8();
+    let b_rgb = img_b.to_rgb8();
+    let mut minx = u32::MAX; let mut miny = u32::MAX;
+    let mut maxx = 0u32; let mut maxy = 0u32;
+    let mut differents: u64 = 0;
+
+    let mut y = phase;
+    while y < h {
+        for x in 0..w {
+            let pa = a_rgb.get_pixel(x, y);
+            let pb = b_rgb.get_pixel(x, y);
+            let d = (pa[0] as i64 - pb[0] as i64).abs()
+                + (pa[1] as i64 - pb[1] as i64).abs()
+                + (pa[2] as i64 - pb[2] as i64).abs();
+            if d > seuil_px {
+                differents += 1;
+                if x < minx { minx = x; }
+                if y < miny { miny = y; }
+                if x > maxx { maxx = x; }
+                if y > maxy { maxy = y; }
+            }
+        }
+        y += pas;
+    }
+    if differents == 0 {
+        return Ok(None);
+    }
+    let pct = differents as f64 * 100.0 / (w as f64 * h as f64);
+    Ok(Some((minx, miny, maxx, maxy, pct)))
+}
+
 /// Grille ASCII d'une zone (4 px/cellule, # = jaune/blanc vif) + total de
 /// pixels jaunes. Équivalent de lire_compteur.py.
 pub fn grille_ascii(chemin: &str, x0: u32, y0: u32, x1: u32, y1: u32) -> Result<(), String> {
