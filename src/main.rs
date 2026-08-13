@@ -702,6 +702,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 t1.elapsed().as_secs_f64(),
                 t2.elapsed().as_secs_f64());
         }
+        // ecran-live --fovea [largeur] [top_zones] [question]
+        //   FOVÉATION EN 1 PASSE (biomimétique, 13/08) — comme le cerveau :
+        //   1. Les yeux (pixels 0.02s) trouvent les zones saillantes
+        //   2. La fovéa (VLM) analyse TOUTES les zones dans UNE mosaïque
+        //   → 1 seul appel VLM au lieu de N : 4 zones = 1.6s vs 8.8s (5.5x)
+        "--fovea" => {
+            let cap = Capteur::new()?;
+            let fovea_w: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1600);
+            let top: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
+            let question = args.get(3).cloned()
+                .unwrap_or_else(|| "Décris brièvement ce que tu vois dans cette grille de zones.".to_string());
+            let h = (fovea_w as f64 * cap.ratio).round() as u32;
+            let t0 = std::time::Instant::now();
+            let png = cap.capture_bytes(fovea_w, h)?;
+            println!("📸 Capture {}x{} en {:.2}s", fovea_w, h, t0.elapsed().as_secs_f64());
+
+            // 1. Les yeux : saillance pixel native (0.02s)
+            let t1 = std::time::Instant::now();
+            let zones = saliency(&png, 8, 5, top)?;
+            println!("🎯 {} zone(s) saillante(s) en {:.3}s", zones.len(), t1.elapsed().as_secs_f64());
+            if zones.is_empty() {
+                println!("⚠️  Aucune zone saillante détectée");
+                return Ok(());
+            }
+
+            // 2. La fovéa : mosaïque de TOUTES les zones en UNE image
+            let t2 = std::time::Instant::now();
+            let mosaic = build_fovea_mosaic(&png, &zones)?;
+            let vlm_result = analyze_image(&mosaic, &question)?;
+            println!("🟢 Fovéa (1 appel): {vlm_result}");
+            println!("⏱️  Fovéation en {:.2}s (pixels {:.2}s + mosaïque+VLM {:.2}s)",
+                t0.elapsed().as_secs_f64(),
+                t1.elapsed().as_secs_f64(),
+                t2.elapsed().as_secs_f64());
+            // Positions des zones pour le grounding
+            for (i, z) in zones.iter().enumerate() {
+                println!("   zone {} : x={}, y={}, {}x{}", i + 1, z.x, z.y, z.w, z.h);
+            }
+        }
         "--ocr" => {
             let cap = Capteur::new()?;
             println!("Mode OCR : extraction des textes + bounding boxes (coordinate priming)");
@@ -2546,6 +2585,53 @@ fn process_mem_mb() -> u64 {
             0
         }
     }
+}
+
+/// Fovéation biomimétique (13/08) : assemble TOUTES les zones saillantes
+/// dans UNE mosaïque carrée (chaque zone réduite à 128px) → 1 seul appel VLM.
+/// Mesuré : 4 zones = 1.6s (83 tokens) vs 4 appels séparés = 8.8s (5.5x).
+fn build_fovea_mosaic(png_bytes: &[u8], zones: &[SalientZone]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut img = image::load_from_memory(png_bytes)?;
+    let (iw, ih) = img.dimensions();
+    let n = zones.len();
+    if n == 0 {
+        return Err("aucune zone pour la fovéa".into());
+    }
+    // Grille carrée : 1→1x1, 2→2x1, 3-4→2x2, 5-9→3x3
+    let cols = (n as f64).sqrt().ceil() as u32;
+    let rows = (n as u32 + cols - 1) / cols;
+    let cell = 128u32;
+    let mut mosaic = image::RgbImage::new(cols * cell, rows * cell);
+
+    for (i, z) in zones.iter().enumerate() {
+        let mw = (z.w as f64 * 0.1) as u32;
+        let mh = (z.h as f64 * 0.1) as u32;
+        let x = z.x.saturating_sub(mw);
+        let y = z.y.saturating_sub(mh);
+        let w = (z.w + 2 * mw).min(iw.saturating_sub(x));
+        let hh = (z.h + 2 * mh).min(ih.saturating_sub(y));
+        let crop = img.crop(x.max(0), y.max(0), w.max(1), hh.max(1));
+        let rgb = crop.to_rgb8();
+        // Réduction au format carré cell×cell (Triangle = rapide, finesse OK)
+        let resized = image::imageops::resize(
+            &rgb, cell, cell,
+            image::imageops::FilterType::Triangle,
+        );
+        let cx = (i as u32 % cols) * cell;
+        let cy = (i as u32 / cols) * cell;
+        image::imageops::overlay(&mut mosaic, &resized, cx as i64, cy as i64);
+    }
+
+    let mut buf = Vec::new();
+    let (mw, mh) = mosaic.dimensions();
+    let raw = mosaic.into_raw();
+    image::codecs::png::PngEncoder::new(&mut std::io::Cursor::new(&mut buf)).write_image(
+        &raw,
+        mw,
+        mh,
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(buf)
 }
 
 /// Zoom fin sur chaque zone saillante : crop + analyse détaillée via le modèle.
