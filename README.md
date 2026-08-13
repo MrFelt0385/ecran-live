@@ -125,6 +125,7 @@ interactif par son rôle + label + bounds, puis on déclenche `AXPress`
 |---|---|
 | **Analyse pixel native** | **0.023s** |
 | **VLM 512px à chaud (3B-4bit, max_tokens 24)** | **~1s** |
+| **VLM sur image répétée (vision cache LFM2-VL)** | **0.55s** ✨ 2.12× |
 | **VLM sur crop ciblé (120×70)** | **1.0s** |
 | **VLM sur image complexe (crop 128px)** | **1.25s** |
 | Cycle vision complet (capture→analyse→compréhension) | **~1.3s** |
@@ -135,7 +136,25 @@ interactif par son rôle + label + bounds, puis on déclenche `AXPress`
 > `max_tokens` (24 par défaut) fait tomber la latence de 6s à ~1s sans perte
 > pour les réponses courtes (oui/non, nombre, mot). Analyser des **zones
 > ciblées** (crop) plutôt que l'écran entier divise encore le temps — le
-> pipeline `--scan` : pixels (0.02s) → crops réduits → VLM court = **~1.2s**. 
+> pipeline `--scan` : pixels (0.02s) → crops réduits → VLM court = **~1.2s**.
+
+### ✨ Vision Feature Cache (contribution à mlxcel)
+
+Nous avons **implémenté le cache de features vision pour LFM2-VL** dans mlxcel
+(le code officiel ne l'avait que pour Qwen/Gemma/Granite) :
+
+- **Principe** : les features du vision tower (encodeur d'image) sont hashées
+  (SHA-256 + budget soft-tokens) et stockées. Quand la **même image** revient
+  (conversation multi-tours, vision continue), le serveur **saute le vision
+  tower + connecteur** et réutilise les features.
+- **Gain mesuré** : 1158ms → 547ms (**2.12×**) sur image répétée, finesse
+  identique (features déterministes, réponses strictement égales).
+- **Fichiers** : `src/vision/lfm2_vl.rs` (méthode `get_input_embeddings_with_cache`,
+  pattern Qwen2.5-VL) + `src/multimodal/vlm_runtime.rs` (activation du cache
+  pour `VlmRuntimeRef::Lfm2Vl`).
+
+C'est exactement le cas d'usage de la **vision continue** : les écrans stables
+(HUD, fenêtres fixes) sont ré-analysés en **0.55s** au lieu de **1.16s**.
 
 ### Comparaison des modèles VLM
 
