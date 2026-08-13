@@ -42,7 +42,7 @@ mkdir -p models/LFM2.5-VL-3B-MLX-4bit && cd models/LFM2.5-VL-3B-MLX-4bit
 # Test manuel du serveur
 cd ~/Projects/mlxcel
 ./target/release/mlxcel-server -m models/LFM2.5-VL-3B-MLX-4bit --port 8085 \
-  --host 127.0.0.1 --parallel 1 --enable-vlm-prefix-cache
+  --host 127.0.0.1 --parallel 1 -c 1024 --enable-vlm-prefix-cache
 # Vérifiez : curl -s http://127.0.0.1:8085/v1/models
 # Alternative plus légère : LFM2.5-VL-1.6B-4bit (1.4 GB, 1.7 Go RAM)
 ```
@@ -68,8 +68,10 @@ cd ~/Projects/mlxcel
         <string>--host</string>
         <string>127.0.0.1</string>
         <string>--parallel</string>
-        <string>4</string>
+        <string>1</string>
         <string>--enable-vlm-prefix-cache</string>
+        <string>-c</string>
+        <string>1024</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

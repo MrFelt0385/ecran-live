@@ -139,6 +139,12 @@ interactif par son rôle + label + bounds, puis on déclenche `AXPress`
 Le 3B apporte le **grounding** (RefCOCO 87.9) et la **compréhension d'écran**
 (ScreenSpot-v2 82.2 web) — pour +1.1 Go de RAM seulement.
 
+> **Référence quantification** : AWQ (Activation-aware Weight Quantization),
+> *MLSys 2024 Best Paper* — MIT HAN Lab, Tsinghua, MIT-IBM Watson AI Lab.
+> Protéger 1 % des poids saillants (identifiés par les activations, pas les
+> poids) réduit fortement l'erreur de quantification, y compris pour les
+> modèles multi-modaux. [arXiv:2306.00978](https://arxiv.org/abs/2306.00978)
+
 ---
 
 ## 🛠️ Installation
