@@ -277,6 +277,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut changed_n = 0u64;
             let mut last_report = Instant::now();
             let mut last_analysis = Instant::now() - Duration::from_secs(10);
+            // ══ VISION DIRECTE AVEC TÂCHES EN PARALLÈLE (12/08) ══
+            // Les yeux (capture) ne s'arrêtent JAMAIS : pendant que le cerveau
+            // (VLM) analyse une frame dans un thread de fond, la boucle
+            // continue de capturer. On ne rate aucun événement.
+            let mut vlm_thread: Option<std::thread::JoinHandle<(u64, String)>> = None;
 
             loop {
                 let frame_start = Instant::now();
@@ -321,6 +326,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 last_analysis = Instant::now();
 
+                // ══ ANALYSE EN THREAD DE FOND (vision directe parallèle) ══
+                // La capture continue PENDANT que le VLM analyse : on empile
+                // la frame à analyser, le thread de fond s'en occupe, et la
+                // boucle repart immédiatement capturer la suivante.
+                if let Some(t) = vlm_thread.take() {
+                    if let Ok((f, ans)) = t.join() {
+                        let one_line: String = ans
+                            .lines()
+                            .map(str::trim)
+                            .filter(|l| !l.is_empty() && !l.starts_with("COORD:"))
+                            .take(1)
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        println!("🟢 frame {} (changée): {}", f, one_line);
+                    }
+                }
+
                 // 3. Analyse VLM rapide (image réduite 384px — prefill ÷10)
                 //    Le prefix-cache mlxcel accélère encore : images voisines
                 //    partagent le préfixe du prompt → tokens économisés.
@@ -336,20 +358,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      Décris les changements visibles, les textes, les éléments actifs.",
                     frame_n
                 );
-                match analyze_image(&small_png, &q) {
-                    Ok(ans) => {
-                        // Réponse nettoyée : on garde la première ligne de sens
-                        let one_line: String = ans
-                            .lines()
-                            .map(str::trim)
-                            .filter(|l| !l.is_empty() && !l.starts_with("COORD:"))
-                            .take(1)
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        println!("🟢 frame {} (changée): {}", frame_n, one_line);
-                    }
-                    Err(e) => eprintln!("⚠️ analyse: {}", e),
-                }
+                let f = frame_n;
+                vlm_thread = Some(std::thread::spawn(move || {
+                    let ans = analyze_image(&small_png, &q).unwrap_or_else(|e| e);
+                    (f, ans)
+                }));
 
                 // Rapport périodique (RAM + stats) toutes les 10s
                 if last_report.elapsed() >= Duration::from_secs(10) {
