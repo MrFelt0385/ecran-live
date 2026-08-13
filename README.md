@@ -124,13 +124,13 @@ interactif par son rôle + label + bounds, puis on déclenche `AXPress`
 | Composant | Valeur |
 |---|---|
 | **Analyse pixel native** | **0.023s** |
-| **VLM 512px à chaud (3B-4bit, max_tokens 24)** | **~1s** |
+| **VLM 512px à chaud (3B-4bit-vq, max_tokens 24)** | **0.51s** |
 | **VLM sur image répétée (vision cache LFM2-VL)** | **0.55s** ✨ 2.12× |
 | **VLM sur crop ciblé (120×70)** | **1.0s** |
 | **VLM sur image complexe (crop 128px)** | **1.25s** |
 | Cycle vision complet (capture→analyse→compréhension) | **~1.3s** |
-| Footprint VLM 3B-4bit | **2.8 Go** (tient dans 8 Go) |
-| RAM système libre après chargement | **44-69 %** (seuil critique 11-13 %) |
+| Footprint VLM 3B-4bit-vq (vision tower quantifié) | **2.3 Go** (tient dans 8 Go) |
+| RAM système libre après chargement | **64 %** (seuil critique 11-13 %) |
 
 > **Leçon performance (13/08)** : le VLM génère à ~30 tok/s. Limiter
 > `max_tokens` (24 par défaut) fait tomber la latence de 6s à ~1s sans perte
@@ -161,10 +161,18 @@ C'est exactement le cas d'usage de la **vision continue** : les écrans stables
 | Modèle | Footprint | Latence chaude | Disque |
 |---|---|---|---|
 | LFM2.5-VL-1.6B-4bit | 1.7 Go | 1.3s | 1.4 GB |
-| **LFM2.5-VL-3B-4bit** | **2.8 Go** | **~1.0s** | **2.2 GB** |
+| **LFM2.5-VL-3B-4bit-vq** | **2.3 Go** | **0.51s** | **1.97 GB** |
 
 Le 3B apporte le **grounding** (RefCOCO 87.9) et la **compréhension d'écran**
-(ScreenSpot-v2 82.2 web) — pour +1.1 Go de RAM seulement.
+(ScreenSpot-v2 82.2 web) — pour +0.6 Go de RAM seulement (vs 1.1 Go avec le
+vision tower fp16).
+
+> **✨ Vision tower quantifié (13/08)** : le modèle 4-bit officiel laisse le
+> vision tower SigLIP2 400M en fp16 (0.83 GB, 35% du modèle !). En le
+> quantifiant aussi en 4-bit (gs64), le footprint passe de 2.8 → **2.3 Go**
+> et la latence de ~1s → **0.51s** (déquant GPU natif) — **finesse identique**
+> (réponses strictement égales). Script + pièges dans
+> [`docs/QUANT_VISION_TOWER.md`](docs/QUANT_VISION_TOWER.md).
 
 > **Référence quantification** : AWQ (Activation-aware Weight Quantization),
 > *MLSys 2024 Best Paper* — MIT HAN Lab, Tsinghua, MIT-IBM Watson AI Lab.

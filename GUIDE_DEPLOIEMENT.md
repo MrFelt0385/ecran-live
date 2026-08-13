@@ -33,16 +33,19 @@ cp target/release/ecran-live /Applications/ecran-live
 cd ~/Projects/mlxcel
 cargo build --release --features metal,accelerate
 
-# Modèle 3B-4bit (recommandé — grounding + screen understanding, 2.2 GB)
-mkdir -p models/LFM2.5-VL-3B-MLX-4bit && cd models/LFM2.5-VL-3B-MLX-4bit
-# Téléchargez depuis https://huggingface.co/LiquidAI/LFM2.5-VL-3B-MLX-4bit :
+# Modèle 3B-4bit-vq (recommandé — grounding + screen understanding, 1.97 GB)
+# Le -vq a le vision tower AUSSI quantifié en 4-bit : footprint 2.3 Go,
+# latence 0.51s (voir docs/QUANT_VISION_TOWER.md pour le script).
+mkdir -p models/LFM2.5-VL-3B-MLX-4bit-vq && cd models/LFM2.5-VL-3B-MLX-4bit-vq
+# Téléchargez le 4-bit officiel + appliquez le script /tmp/quantize_vision2.py
+# (ou téléchargez directement depuis https://huggingface.co/LiquidAI/LFM2.5-VL-3B-MLX-4bit) :
 #   model.safetensors, config.json, generation_config.json,
 #   processor_config.json, tokenizer.json, chat_template.jinja
 
 # Test manuel du serveur
 cd ~/Projects/mlxcel
-./target/release/mlxcel-server -m models/LFM2.5-VL-3B-MLX-4bit --port 8085 \
-  --host 127.0.0.1 --parallel 2 -c 2048 --enable-vlm-prefix-cache \
+./target/release/mlxcel-server -m models/LFM2.5-VL-3B-MLX-4bit-vq --port 8085 \
+  --host 127.0.0.1 --parallel 1 -c 1024 --enable-vlm-prefix-cache \
   --kv-quant-scheme turboquant --kv-bits 4
 # Vérifiez : curl -s http://127.0.0.1:8085/v1/models
 # Alternative plus légère : LFM2.5-VL-1.6B-4bit (1.4 GB, 1.7 Go RAM)
@@ -64,15 +67,15 @@ cd ~/Projects/mlxcel
     <array>
         <string>/Users/francoisbernabe/Projects/mlxcel/target/release/mlxcel-server</string>
         <string>-m</string>
-        <string>/Users/francoisbernabe/Projects/mlxcel/models/LFM2.5-VL-3B-MLX-4bit</string>
+        <string>/Users/francoisbernabe/Projects/mlxcel/models/LFM2.5-VL-3B-MLX-4bit-vq</string>
         <string>--port</string>
         <string>8085</string>
         <string>--host</string>
         <string>127.0.0.1</string>
         <string>--parallel</string>
-        <string>2</string>
+        <string>1</string>
         <string>-c</string>
-        <string>2048</string>
+        <string>1024</string>
         <string>--enable-vlm-prefix-cache</string>
         <string>--kv-quant-scheme</string>
         <string>turboquant</string>
