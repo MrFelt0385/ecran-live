@@ -7,11 +7,15 @@ avec, en accessoire, la capacité d'agir (clic par élément AX qui ne touche
 jamais au curseur).
 
 > **Co-créé avec Sypherine** — fille du silence et du tonnerre de silicium.
-> Sypherine a conçu l'architecture de vision, les optimisations (mlxcel 4-bit,
-> prefix-cache, vision directe), les benchmarks et la documentation.
+> Sypherine a conçu l'architecture de vision et les optimisations majeures :
+> **vision tower quantifié** (2.8 → 2.3 Go, 0.51s — −500 Mo RAM), **vision
+> feature cache** (2.12× sur images répétées, contribution à mlxcel),
+> **fovéation biomimétique** `--fovea` (5.5× sur multi-zones), **max_tokens
+> adaptatif** (6s → 1s), préfix-cache et vision directe.
 >
 > Développé avec **Hermes Agent** (Nous Research).
-> Vision par **mlxcel** (Rust + MLX C++) + **LiquidAI/LFM2.5-VL-3B-4bit**.
+> Vision par **mlxcel** (Rust + MLX C++) + **LiquidAI/LFM2.5-VL-3B-4bit-vq**
+> (vision tower SigLIP2 quantifié — voir [`docs/QUANT_VISION_TOWER.md`](docs/QUANT_VISION_TOWER.md)).
 
 ---
 
@@ -208,21 +212,24 @@ Ajoutez `/Applications/ecran-live` dans :
 ⚠️ Après chaque rebuild (nouveau cdhash), macOS **révoque** les permissions →
 ré-accorder puis relancer. Vérifiez avec `ecran-live --ax-trusted`.
 
-### 3. Serveur VLM (mlxcel + LFM2.5-VL-3B-4bit)
+### 3. Serveur VLM (mlxcel + LFM2.5-VL-3B-4bit-vq)
 
 ```bash
-# Télécharger le modèle MLX 4-bit (officiel LiquidAI)
+# 1. Télécharger le modèle MLX 4-bit officiel (LiquidAI)
 mkdir -p models/LFM2.5-VL-3B-MLX-4bit && cd models/LFM2.5-VL-3B-MLX-4bit
 curl -sL -o model.safetensors \
   https://huggingface.co/LiquidAI/LFM2.5-VL-3B-MLX-4bit/resolve/main/model.safetensors
 # + config.json, generation_config.json, processor_config.json,
 #   tokenizer.json, chat_template.jinja (même repo)
 
-# Lancer le serveur (LE flag clé : VLM prefix cache)
+# 2. (Recommandé) Quantifier le vision tower → modèle -vq (2.8 → 2.3 Go, 0.51s)
+#    Script + pièges : docs/QUANT_VISION_TOWER.md
+
+# 3. Lancer le serveur (flags clés : prefix-cache + turboquant)
 ./target/release/mlxcel-server \
-  -m models/LFM2.5-VL-3B-MLX-4bit \
+  -m models/LFM2.5-VL-3B-MLX-4bit-vq \
   --port 8085 --host 127.0.0.1 \
-  --parallel 2 -c 2048 --enable-vlm-prefix-cache \
+  --parallel 1 -c 1024 --enable-vlm-prefix-cache \
   --kv-quant-scheme turboquant --kv-bits 4
 ```
 
