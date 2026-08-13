@@ -742,13 +742,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         // ecran-live --veille [largeur] [secondes] [question]
-        //   VISION PRÉDICTIVE (biomimétique, 13/08) — le cerveau ne traite
-        //   que l'ERREUR DE PRÉDICTION (predictive coding) :
-        //   1. Capture frame N → analyse VLM (la prédiction du monde)
-        //   2. Capture frame N+1 → diff pixels (0.05s) → bbox du changement
-        //   3. Si immobile → rien (économie totale, RAM stable)
-        //   4. Si changement → VLM UNIQUEMENT sur le bbox changé (~0.5s)
-        //   + INHIBITION DE RETOUR : ne jamais re-analyser une zone identique.
+        //   VISION PRÉDICTIVE + HABITUATION (biomimétique, 13/08) — le cerveau :
+        //   - ne traite que l'ERREUR DE PRÉDICTION (predictive coding)
+        //   - DÉPENSE MOINS sur les scènes familières (habituation, Montaldi 2006)
+        //   - ne garde que ~7 items en mémoire de travail (Miller 1956)
+        //   Boucle : diff pixels → immobile = 0 analyse | familier = réponse
+        //   du cache perceptif (0 VLM) | nouveau = VLM sur la zone changée.
         "--veille" => {
             let cap = Capteur::new()?;
             let veille_w: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1600);
@@ -757,19 +756,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| "Que s'est-il passé à l'écran ? Réponds en une phrase.".to_string());
             let h = (veille_w as f64 * cap.ratio).round() as u32;
             let mut prev: Option<Vec<u8>> = None;
-            let mut derniere_analyse = std::time::Instant::now() - std::time::Duration::from_secs(2);
             let debut = std::time::Instant::now();
             let mut tours = 0u64;
             let mut analyses = 0u64;
+            let mut habitudes = 0u64;
+            // Hippocampe artificiel : empreinte perceptive → réponse VLM.
+            // L'habituation = plus on voit un écran, moins on dépense.
+            let mut hippocampe: Vec<(Vec<u8>, String)> = Vec::new();
 
-            println!("👁️  Veille prédictive — {}s, capture {}x{}, réaction aux changements", secondes, veille_w, h);
+            // Recherche perceptive : l'empreinte la plus proche dans l'hippocampe.
+            // Distance de Hamming entre empreintes 64x36 → < 12 octets = familier
+            // (tolère curseur, animations subtiles — le cerveau ne les re-traite pas).
+            let chercher_familier = |empr: &[u8], mem: &[(Vec<u8>, String)]| -> Option<String> {
+                let mut best: Option<(usize, &String)> = None;
+                for (e, r) in mem {
+                    let dist = e.iter().zip(empr).filter(|(a, b)| a != b).count();
+                    if let Some((bd, _)) = best {
+                        if dist < bd { best = Some((dist, r)); }
+                    } else {
+                        best = Some((dist, r));
+                    }
+                }
+                best.and_then(|(d, r)| if d <= 12 { Some(r.clone()) } else { None })
+            };
+
+            println!("👁️  Veille prédictive + habituation — {}s, capture {}x{}", secondes, veille_w, h);
             while debut.elapsed().as_secs() < secondes {
                 tours += 1;
                 let png = cap.capture_bytes(veille_w, h)?;
                 if let Some(prev_bytes) = &prev {
                     match analyse::diff_bbox(prev_bytes, &png, 30)? {
                         None => {
-                            println!("   [t{}] immobile — aucune analyse", tours);
+                            // Immobile : ni diff, ni VLM — économie totale
+                            let empr = fingerprint(&png)?;
+                            if let Some(reponse) = chercher_familier(&empr, &hippocampe) {
+                                habitudes += 1;
+                                println!("   [t{}] immobile + familier → habituation (0 VLM) | {}", tours, reponse);
+                            } else {
+                                println!("   [t{}] immobile — aucune analyse", tours);
+                            }
                         }
                         Some((x0, y0, x1, y1, pct)) => {
                             // Marge autour du bbox (contexte visuel)
@@ -778,16 +803,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let cy0 = y0.saturating_sub(m);
                             let cx1 = (x1 + m).min(veille_w);
                             let cy1 = (y1 + m).min(h);
-                            // Évite les micro-changements (<0.05% de l'écran :
-                            // curseur, animations subtiles — le cerveau les ignore)
                             if pct < 0.05 {
                                 println!("   [t{}] micro-changement ({:.3}%) ignoré (inhibition)", tours, pct);
+                                // Habituation perceptive : l'écran est "familier"
+                                let empr = fingerprint(&png)?;
+                                if let Some(reponse) = chercher_familier(&empr, &hippocampe) {
+                                    habitudes += 1;
+                                    println!("   [t{}] familier → réutilise la réponse (0 VLM) | {}", tours, reponse);
+                                }
                             } else {
                                 // VLM sur la zone CHANGÉE seulement (predictive coding)
                                 let crop = analyse::crop_bytes_png(&png, cx0, cy0, cx1, cy1, 1)?;
                                 let t0 = std::time::Instant::now();
                                 let reponse = analyze_image(&crop, &question)?;
                                 analyses += 1;
+                                // Mémorise dans l'hippocampe (l'écran devient familier)
+                                let empr = fingerprint(&png)?;
+                                hippocampe.push((empr, reponse.clone()));
                                 println!("   [t{}] CHANGEMENT {:.2}% bbox=({},{})-({},{}) → {:.2}s | {}", tours, pct, cx0, cy0, cx1, cy1, t0.elapsed().as_secs_f64(), reponse);
                             }
                         }
@@ -797,13 +829,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let t0 = std::time::Instant::now();
                     let reponse = analyze_image(&png, &question)?;
                     analyses += 1;
+                    let empr = fingerprint(&png)?;
+                    hippocampe.push((empr, reponse.clone()));
                     println!("   [t{}] état initial → {:.2}s | {}", tours, t0.elapsed().as_secs_f64(), reponse);
                 }
                 prev = Some(png);
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
-            println!("⏱️  Veille terminée : {} tours, {} analyses VLM, {} économisées",
-                tours, analyses, tours.saturating_sub(analyses));
+            println!("⏱️  Veille terminée : {} tours, {} analyses VLM, {} habituation (réponses réutilisées), {} économisées",
+                tours, analyses, habitudes, tours.saturating_sub(analyses + habitudes));
         }
         "--ocr" => {
             let cap = Capteur::new()?;
