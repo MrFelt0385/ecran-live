@@ -961,15 +961,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tours, analyses, habitudes, anticipations, deltas_connus, seuil_inhibition);
         }
         // ecran-live --blob [largeur] [secondes] [question]
-        //   LE BLOB-ESPION (Physarum polycephalum, biomimétique 13/08) :
-        //   un agent en planque qui OBSERVE ce qui se passe et INFORME.
-        //   Il ne cherche pas une couleur — il surveille le MOUVEMENT :
-        //   1. EXPLORE : diff entrelacé (micro-saccades) → où ça bouge ?
-        //   2. OBSERVE : crop autour de la zone en mouvement + VLM →
-        //      « il se passe X à (x,y) »
-        //   3. RÉTRACTE : si plus rien ne bouge → repos (0 analyse)
-        //   4. Mémoire : garde la trajectoire pour anticiper et informer
-        //      du déplacement (« l'objet va vers le nord-est »)
+        //   LE BLOB-ESPION INFORMATEUR (Physarum polycephalum, biomimétique) :
+        //   son but = OPTIMISER LES REQUÊTES pour gagner en rapidité d'échange.
+        //   Physarum explore en continu GRATUITEMENT (pixels) et ne "digère"
+        //   (VLM, coûteux 3-5s) QUE la nourriture qui en vaut la peine.
+        //   Pipeline :
+        //   1. EXPLORE continu : pixels (0.05s) → où bouge ? bbox + %
+        //   2. RATE-LIMIT : max 1 requête VLM / intervalle (le temps d'une
+        //      requête) — sinon on suit par PIXELS (gratuit)
+        //   3. SUIT par pixels entre 2 requêtes : rapporte "même objet,
+        //      maintenant à (x,y), direction →" — 0 requête
+        //   4. OBSERVE (VLM) seulement si : nouvel objet / zone changée /
+        //      intervalle écoulé → "il se passe X à (x,y)"
+        //   => même information avec 3-4× moins de requêtes VLM
         "--blob" => {
             let cap = Capteur::new()?;
             let blob_w: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1600);
@@ -985,8 +989,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut phase_entrelace: u32 = 0;
             let mut prev: Option<Vec<u8>> = None;
             let mut trajectoire: Vec<(u32, u32)> = Vec::new();
+            let mut derniere_requete = std::time::Instant::now() - std::time::Duration::from_secs(10);
+            let mut description_courante = String::new();
+            // Intervalle minimum entre 2 requêtes VLM (le temps d'une requête
+            // chaude ~2-3s + marge) — c'est LE levier de rapidité d'échange
+            let intervalle = std::time::Duration::from_secs(6);
 
-            println!("🕵️  BLOB-ESPION — {}s, observe le mouvement ({}x{}), informe de ce qui se passe", secondes, blob_w, h);
+            println!("🕵️  BLOB-ESPION INFORMATEUR — {}s, requêtes optimisées (max 1/{}s), observe et informe", secondes, intervalle.as_secs());
             while debut.elapsed().as_secs() < secondes {
                 tours += 1;
                 let png = cap.capture_bytes(blob_w, h)?;
@@ -997,53 +1006,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else { None };
 
                 if let Some((x0, y0, x1, y1, pct)) = mouvement {
-                    // 2) OBSERVE : zone en mouvement (avec contexte 2×)
                     let cx = (x0 + x1) / 2;
                     let cy = (y0 + y1) / 2;
-                    let bw = (x1 - x0).max(1);
-                    let bh = (y1 - y0).max(1);
-                    let m = bw.max(bh).max(30) * 2;
-                    let cx0 = cx.saturating_sub(m);
-                    let cy0 = cy.saturating_sub(m);
-                    let cx1 = (cx + m).min(blob_w);
-                    let cy1 = (cy + m).min(h);
                     dernier_pos = Some((cx, cy));
                     trajectoire.push((cx, cy));
                     if trajectoire.len() > 5 { trajectoire.remove(0); }
-                    let crop = analyse::crop_bytes_png(&png, cx0, cy0, cx1, cy1, 1)?;
-                    let t0 = std::time::Instant::now();
-                    let reponse = analyze_image(&crop, &question)?;
-                    analyses += 1;
-                    // Informe du déplacement (trajectoire → direction)
                     let dir = if trajectoire.len() >= 2 {
                         let (ax, ay) = trajectoire[trajectoire.len() - 2];
                         let (bx, by) = trajectoire[trajectoire.len() - 1];
                         let (dx, dy) = (bx as i64 - ax as i64, by as i64 - ay as i64);
-                        let d = if dx.abs() > dy.abs() {
+                        if dx.abs() > dy.abs() {
                             if dx > 0 { "→ droite" } else { "← gauche" }
                         } else {
                             if dy > 0 { "↓ bas" } else { "↑ haut" }
-                        };
-                        format!(" | mouvement vers {}", d)
-                    } else { String::new() };
-                    println!("   [t{}] 🕵️  MOUVEMENT {:.2}% à ({},{}) → {:.2}s | {}{}", tours, pct, cx, cy, t0.elapsed().as_secs_f64(), reponse, dir);
+                        }
+                    } else { "" };
+
+                    // 2+3) RATE-LIMIT : le VLM est coûteux → on ne l'appelle
+                    // que si l'intervalle est écoulé. Sinon : SUIVI pixels
+                    // (gratuit) + rapport position/direction.
+                    let intervalle_ecoule = derniere_requete.elapsed() >= intervalle;
+                    let nouvel_objet = description_courante.is_empty();
+                    if intervalle_ecoule || nouvel_objet {
+                        // 4) OBSERVE : VLM sur la zone (contexte 2×)
+                        let bw = (x1 - x0).max(1);
+                        let bh = (y1 - y0).max(1);
+                        let m = bw.max(bh).max(30) * 2;
+                        let cx0 = cx.saturating_sub(m);
+                        let cy0 = cy.saturating_sub(m);
+                        let cx1 = (cx + m).min(blob_w);
+                        let cy1 = (cy + m).min(h);
+                        let crop = analyse::crop_bytes_png(&png, cx0, cy0, cx1, cy1, 1)?;
+                        let t0 = std::time::Instant::now();
+                        let reponse = analyze_image(&crop, &question)?;
+                        analyses += 1;
+                        derniere_requete = std::time::Instant::now();
+                        description_courante = reponse.clone();
+                        println!("   [t{}] 🕵️  RAPPORT à ({},{}) → {:.2}s | {} | {}", tours, cx, cy, t0.elapsed().as_secs_f64(), reponse, dir);
+                    } else {
+                        // SUIVI gratuit : même objet, on rapporte sa position
+                        suivis += 1;
+                        println!("   [t{}] 🕵️  SUIT à ({},{}) {} (0 requête — rate-limit) | {}", tours, cx, cy, dir, description_courante);
+                    }
                 } else {
-                    // 3) RÉTRACTE / REPOS : rien ne bouge
+                    // RÉTRACTE / REPOS
                     if dernier_pos.is_some() {
                         suivis += 1;
-                        println!("   [t{}] 🕵️  CALME — plus de mouvement (0 analyse), dernier à {:?}", tours, dernier_pos);
+                        println!("   [t{}] 🕵️  CALME — plus de mouvement (0 requête), dernier à {:?}", tours, dernier_pos);
                         dernier_pos = None;
                         trajectoire.clear();
+                        description_courante.clear();
                     } else {
-                        println!("   [t{}] 🕵️  calme — rien à signaler (0 analyse)", tours);
+                        println!("   [t{}] 🕵️  calme — rien à signaler (0 requête)", tours);
                     }
                 }
                 prev = Some(png);
                 phase_entrelace = (phase_entrelace + 1) % 3;
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
-            println!("⏱️  BLOB-ESPION terminé : {} tours | {} analyses | {} retours au calme | dernière zone {:?}",
-                tours, analyses, suivis, dernier_pos);
+            println!("⏱️  BLOB-ESPION terminé : {} tours | {} requêtes VLM | {} suivis pixels | dernière zone {:?} | économie {} requêtes évitées",
+                tours, analyses, suivis, dernier_pos, suivis.saturating_sub(analyses));
         }
         // ecran-live --blob-test <dossier> [question]
         //   BLOB-ESPION EN MODE TEST : lit les frames PNG d'un dossier
@@ -1064,11 +1086,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .filter(|p| p.extension().map(|x| x == "png").unwrap_or(false))
                 .collect();
             frames.sort();
-            println!("🕵️  BLOB-ESPION TEST — {} frames depuis {}", frames.len(), dossier);
+            println!("🕵️  BLOB-ESPION TEST — {} frames depuis {} (rate-limit: 1 requête/3 frames)", frames.len(), dossier);
             let mut analyses = 0u64;
+            let mut suivis = 0u64;
             let mut derniere_pos: Option<(u32, u32)> = None;
             let mut trajectoire: Vec<(u32, u32)> = Vec::new();
             let mut prev: Option<Vec<u8>> = None;
+            let mut description_courante = String::new();
             for (i, f) in frames.iter().enumerate() {
                 let png = std::fs::read(f).map_err(|e| format!("{} : {}", f.display(), e))?;
                 let mouvement = if let Some(p) = &prev {
@@ -1077,44 +1101,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some((x0, y0, x1, y1, pct)) = mouvement {
                     let cx = (x0 + x1) / 2;
                     let cy = (y0 + y1) / 2;
-                    let bw = (x1 - x0).max(1);
-                    let bh = (y1 - y0).max(1);
-                    let m = bw.max(bh).max(30) * 2;
-                    let cx0 = cx.saturating_sub(m);
-                    let cy0 = cy.saturating_sub(m);
-                    let (w, hh) = image::load_from_memory(&png).map(|im| (im.width(), im.height()))?;
-                    let cx1 = (cx + m).min(w);
-                    let cy1 = (cy + m).min(hh);
                     derniere_pos = Some((cx, cy));
                     trajectoire.push((cx, cy));
                     if trajectoire.len() > 5 { trajectoire.remove(0); }
-                    let crop = analyse::crop_bytes_png(&png, cx0, cy0, cx1, cy1, 1)?;
-                    let t0 = std::time::Instant::now();
-                    let reponse = analyze_image(&crop, &question)?;
-                    analyses += 1;
                     let dir = if trajectoire.len() >= 2 {
                         let (ax, ay) = trajectoire[trajectoire.len() - 2];
                         let (bx, by) = trajectoire[trajectoire.len() - 1];
                         let (dx, dy) = (bx as i64 - ax as i64, by as i64 - ay as i64);
-                        let d = if dx.abs() > dy.abs() {
+                        if dx.abs() > dy.abs() {
                             if dx > 0 { "→ droite" } else { "← gauche" }
                         } else {
                             if dy > 0 { "↓ bas" } else { "↑ haut" }
-                        };
-                        format!(" | mouvement vers {}", d)
-                    } else { String::new() };
-                    println!("   [f{}] 🕵️  MOUVEMENT {:.2}% à ({},{}) → {:.2}s | {}{}", i, pct, cx, cy, t0.elapsed().as_secs_f64(), reponse, dir);
+                        }
+                    } else { "" };
+                    // RATE-LIMIT : 1 requête toutes les 3 frames + nouvel objet
+                    let doit_analyser = description_courante.is_empty() || i % 3 == 0;
+                    if doit_analyser {
+                        let bw = (x1 - x0).max(1);
+                        let bh = (y1 - y0).max(1);
+                        let m = bw.max(bh).max(30) * 2;
+                        let cx0 = cx.saturating_sub(m);
+                        let cy0 = cy.saturating_sub(m);
+                        let (w, hh) = image::load_from_memory(&png).map(|im| (im.width(), im.height()))?;
+                        let cx1 = (cx + m).min(w);
+                        let cy1 = (cy + m).min(hh);
+                        let crop = analyse::crop_bytes_png(&png, cx0, cy0, cx1, cy1, 1)?;
+                        let t0 = std::time::Instant::now();
+                        let reponse = analyze_image(&crop, &question)?;
+                        analyses += 1;
+                        description_courante = reponse.clone();
+                        println!("   [f{}] 🕵️  RAPPORT à ({},{}) → {:.2}s | {} | {}", i, cx, cy, t0.elapsed().as_secs_f64(), reponse, dir);
+                    } else {
+                        suivis += 1;
+                        println!("   [f{}] 🕵️  SUIT à ({},{}) {} (0 requête — rate-limit) | {}", i, cx, cy, dir, description_courante);
+                    }
                 } else if derniere_pos.is_some() {
                     println!("   [f{}] 🕵️  CALME — plus de mouvement (0 analyse)", i);
                     derniere_pos = None;
                     trajectoire.clear();
+                    description_courante.clear();
                 } else {
                     println!("   [f{}] 🕵️  calme — rien à signaler (0 analyse)", i);
                 }
                 prev = Some(png);
             }
-            println!("⏱️  BLOB-ESPION TEST terminé : {} frames | {} analyses | dernière zone {:?}",
-                frames.len(), analyses, derniere_pos);
+            println!("⏱️  BLOB-ESPION TEST terminé : {} frames | {} requêtes VLM | {} suivis pixels | économie {} requêtes évitées",
+                frames.len(), analyses, suivis, suivis.saturating_sub(analyses));
         }
         "--ocr" => {
             let cap = Capteur::new()?;
