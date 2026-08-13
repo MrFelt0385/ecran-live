@@ -37,7 +37,7 @@ lire les détails fins.
 │    • découpage en zones → threads indépendants → VLM      │
 │    • collecte ordonnée des résultats                      │
 │ 5. COMPRÉHENSION DE SCÈNE (--vlm / --conv / --palais)     │
-│    • VLM local 512px (~1s à chaud, max_tokens 24)         │
+│    • VLM local 512px (0.51s à chaud, max_tokens 24)       │
 │    • grounding d'objets par requête (RefCOCO 87.9)        │
 │    • mémoire spatiale persistante (~/palais)              │
 └──────────────────────────────────────────────────────────┘
@@ -82,7 +82,7 @@ ecran-live --deep 3 2   # grille 3x2, 6 zones analysées en parallèle
 
 ### 🧠 Compréhension de scène
 
-- `--vlm` — description de scène (512px, ~1s à chaud avec le 3B-4bit, max_tokens 24)
+- `--vlm` — description de scène (512px, 0.51s à chaud avec le 3B-4bit-vq, max_tokens 24)
 - `--scan` — **boucle rapide** : saillance pixels (0.02s) → crops réduits 128px → VLM court (~1.2s total)
 - `--conv` — conversation multi-tours avec le VLM (cache KV)
 - `--palais` — **mémoire spatiale persistante** : le modèle se souvient de ce
@@ -277,7 +277,7 @@ ecran-live --clic-ax-label <pid> CLIQUE
 ### Vision VLM (local, Metal)
 | Mode | Description |
 |---|---|
-| `--vlm` | Compréhension de scène (défaut 512px, max_tokens 24 → ~1s) |
+| `--vlm` | Compréhension de scène (défaut 512px, max_tokens 24 → 0.51s) |
 | `--scan` | **Boucle rapide** : saillance pixels → crops réduits 128px → VLM (~1.2s) |
 | `--conv` | Conversation multi-tours (cache KV) |
 | `--vlmzone` | Crop + zoom 3× avant VLM |
