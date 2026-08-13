@@ -718,6 +718,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let png = cap.capture_bytes(fovea_w, h)?;
             println!("📸 Capture {}x{} en {:.2}s", fovea_w, h, t0.elapsed().as_secs_f64());
 
+            // MODÈLE MENTAL : le cerveau établit le contexte global avant
+            // de regarder les détails — la fovéa est ancrée dans la scène
+            let mut contexte = String::new();
+            match etablir_contexte(&png, "Résume en une phrase le type d'écran affiché (application, fenêtres, contexte général).") {
+                Ok(c) => contexte = c,
+                Err(e) => eprintln!("   (modèle mental indisponible : {})", e),
+            }
+
             // 1. Les yeux : saillance pixel native (0.02s)
             let t1 = std::time::Instant::now();
             let zones = saliency(&png, 8, 5, top)?;
@@ -730,7 +738,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 2. La fovéa : mosaïque de TOUTES les zones en UNE image
             let t2 = std::time::Instant::now();
             let mosaic = build_fovea_mosaic(&png, &zones)?;
-            let vlm_result = analyze_image(&mosaic, &question)?;
+            let vlm_result = analyze_image_ctx(&mosaic, &question, &contexte)?;
             println!("🟢 Fovéa (1 appel): {vlm_result}");
             println!("⏱️  Fovéation en {:.2}s (pixels {:.2}s + mosaïque+VLM {:.2}s)",
                 t0.elapsed().as_secs_f64(),
@@ -832,6 +840,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             println!("🧠  Cerveau complet — {}s, capture {}x{} (prédiction + habituation + anticipation + deltas)", secondes, veille_w, h);
+            // MODÈLE MENTAL : le cerveau établit d'abord le contexte global
+            // puis ancre chaque analyse dans ce modèle (qualité fiable).
+            let mut contexte = String::new();
+            let premiere = cap.capture_bytes(veille_w, h)?;
+            match etablir_contexte(&premiere, "Résume en une phrase le type d'écran affiché (application, fenêtres, contexte général).") {
+                Ok(c) => contexte = c,
+                Err(e) => eprintln!("   (modèle mental indisponible : {})", e),
+            }
             while debut.elapsed().as_secs() < secondes {
                 tours += 1;
                 let png = cap.capture_bytes(veille_w, h)?;
@@ -887,7 +903,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     // VLM sur la zone CHANGÉE (predictive coding)
                                     let crop = analyse::crop_bytes_png(&png, cx0, cy0, cx1, cy1, 1)?;
                                     let t0 = std::time::Instant::now();
-                                    let reponse = analyze_image(&crop, &question)?;
+                                    let reponse = analyze_image_ctx(&crop, &question, &contexte)?;
                                     analyses += 1;
                                     reels_vus += 1;
                                     // Apprend : la frame courante devient familière
@@ -1000,6 +1016,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut description_par_zone_idx: Vec<Option<String>> = vec![None; gz * gc];
 
             println!("🕵️  BLOB-RÉSEAU — {}s, grille {}×{} zones, débit adaptatif (veines épaisses où ça passe)", secondes, gz, gc);
+            // MODÈLE MENTAL : le blob établit d'abord le contexte global
+            // (le cerveau regarde la pièce avant les détails) puis ancre
+            // chaque observation dans ce modèle mental.
+            let mut contexte = String::new();
+            let premiere = cap.capture_bytes(blob_w, h)?;
+            match etablir_contexte(&premiere, "Résume en une phrase le type d'écran affiché (application, fenêtres, contexte général).") {
+                Ok(c) => contexte = c,
+                Err(e) => eprintln!("   (modèle mental indisponible : {})", e),
+            }
             while debut.elapsed().as_secs() < secondes {
                 tours += 1;
                 let png = cap.capture_bytes(blob_w, h)?;
@@ -1037,7 +1062,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let cy1 = (cy + m).min(h);
                         let crop = analyse::crop_bytes_png(&png, cx0, cy0, cx1, cy1, 1)?;
                         let t0 = std::time::Instant::now();
-                        let reponse = analyze_image(&crop, &question)?;
+                        let reponse = analyze_image_ctx(&crop, &question, &contexte)?;
                         analyses += 1;
                         derniere_requete = std::time::Instant::now();
                         description_par_zone_idx[zi] = Some(reponse.clone());
@@ -2889,6 +2914,26 @@ fn analyze_image_ctx(png_bytes: &[u8], question: &str, contexte: &str) -> Result
     }
     let q = format!("Contexte global de l'écran : {}. Question : {}", contexte, question);
     analyze_image_mt(png_bytes, &q, 24)
+}
+
+/// Établit le MODÈLE MENTAL de la scène : réduit l'image à 512px et demande
+/// au VLM un résumé global. Le résultat est injecté dans toutes les analyses
+/// locales des modes (blob, veille, fovéa) pour ancrer chaque regard.
+fn etablir_contexte(png: &[u8], question: &str) -> Result<String, String> {
+    let img = image::load_from_memory(png).map_err(|e| e.to_string())?;
+    let (w, ih) = img.dimensions();
+    let scale = 512.0 / w.max(ih) as f64;
+    let nw = (w as f64 * scale).max(1.0) as u32;
+    let nh = (ih as f64 * scale).max(1.0) as u32;
+    let small = img.resize(nw, nh, image::imageops::FilterType::Triangle);
+    let mut buf = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut std::io::Cursor::new(&mut buf))
+        .write_image(&small.to_rgb8().into_raw(), nw, nh, image::ExtendedColorType::Rgb8)
+        .map_err(|e| e.to_string())?;
+    let t0 = std::time::Instant::now();
+    let contexte = analyze_image(&buf, question)?;
+    eprintln!("   🧠 modèle mental établi ({:.2}s) : {}", t0.elapsed().as_secs_f64(), contexte);
+    Ok(contexte)
 }
 
 /// Version avec max_tokens contrôlable. Le VLM génère à ~30 tok/s : une
