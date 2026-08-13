@@ -742,12 +742,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         // ecran-live --veille [largeur] [secondes] [question]
-        //   VISION PRÉDICTIVE + HABITUATION (biomimétique, 13/08) — le cerveau :
-        //   - ne traite que l'ERREUR DE PRÉDICTION (predictive coding)
-        //   - DÉPENSE MOINS sur les scènes familières (habituation, Montaldi 2006)
-        //   - ne garde que ~7 items en mémoire de travail (Miller 1956)
-        //   Boucle : diff pixels → immobile = 0 analyse | familier = réponse
-        //   du cache perceptif (0 VLM) | nouveau = VLM sur la zone changée.
+        //   VISION PRÉDICTIVE + HABITUATION + ANTICIPATION (biomimétique, 13/08)
+        //   Le cerveau complet :
+        //   - predictive coding : ne traite QUE l'erreur de prédiction
+        //   - habituation (Montaldi 2006) : dépense moins sur les scènes familières
+        //   - mémoire de travail 7±2 (Miller 1956) : hot cache des réponses
+        //   - ANTICIPATION CYCLIQUE : apprend les cycles A→B→C→A et PRÉDIT
+        //     la frame suivante (le cortex prédictif — ne regarde plus ce
+        //     qu'il connaît déjà par cœur)
+        //   - VOCABULAIRE DE DELTAS : mémorise (empreinte du CHANGEMENT →
+        //     signification) — quand un même delta revient, on connaît déjà
+        //     l'événement (la rétine ne transmet que les événements)
+        //   - NEUROGENÈSE : les seuils s'auto-ajustent selon le contexte
+        //     (écran animé → inhibition plus permissive ; écran statique →
+        //     habituation plus agressive)
         "--veille" => {
             let cap = Capteur::new()?;
             let veille_w: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1600);
@@ -760,13 +768,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut tours = 0u64;
             let mut analyses = 0u64;
             let mut habitudes = 0u64;
-            // Hippocampe artificiel : empreinte perceptive → réponse VLM.
-            // L'habituation = plus on voit un écran, moins on dépense.
+            let mut anticipations = 0u64;
+            let mut deltas_connus = 0u64;
+            // Hippocampe : empreinte perceptive → réponse VLM (habituation)
             let mut hippocampe: Vec<(Vec<u8>, String)> = Vec::new();
+            // Cortex prédictif : empreinte → (empreinte suivante prédite, force)
+            // L'anticipation cyclique = quand A a toujours été suivi de B,
+            // le cerveau s'attend à B quand il voit A.
+            let mut cortex: Vec<(Vec<u8>, Vec<u8>, u32)> = Vec::new();
+            // Vocabulaire de deltas : empreinte du changement → signification.
+            // La rétine ne transmet que les ÉVÉNEMENTS ; le cerveau apprend
+            // « ce type de changement = ce type d'événement ».
+            let mut vocabulaire: Vec<(Vec<u8>, String)> = Vec::new();
+            // Neurogenèse : seuil d'inhibition adaptatif (démarre à 0.05%)
+            let mut seuil_inhibition: f64 = 0.05;
+            let mut micros_vus: u64 = 0;
+            let mut reels_vus: u64 = 0;
 
-            // Recherche perceptive : l'empreinte la plus proche dans l'hippocampe.
-            // Distance de Hamming entre empreintes 64x36 → < 12 octets = familier
-            // (tolère curseur, animations subtiles — le cerveau ne les re-traite pas).
             let chercher_familier = |empr: &[u8], mem: &[(Vec<u8>, String)]| -> Option<String> {
                 let mut best: Option<(usize, &String)> = None;
                 for (e, r) in mem {
@@ -779,16 +797,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 best.and_then(|(d, r)| if d <= 12 { Some(r.clone()) } else { None })
             };
+            // Recherche dans le vocabulaire de deltas (distance Hamming)
+            let chercher_delta = |empr: &[u8], voc: &[(Vec<u8>, String)]| -> Option<String> {
+                let mut best: Option<(usize, &String)> = None;
+                for (e, r) in voc {
+                    let dist = e.iter().zip(empr).filter(|(a, b)| a != b).count();
+                    if let Some((bd, _)) = best {
+                        if dist < bd { best = Some((dist, r)); }
+                    } else {
+                        best = Some((dist, r));
+                    }
+                }
+                best.and_then(|(d, r)| if d <= 12 { Some(r.clone()) } else { None })
+            };
+            // Anticipation : à partir de l'empreinte courante, la prochaine
+            // attendue (si le cortex a appris le cycle)
+            let predire = |empr: &[u8], cx: &[(Vec<u8>, Vec<u8>, u32)]| -> Option<Vec<u8>> {
+                let mut best: Option<(u32, &Vec<u8>)> = None;
+                for (e, suiv, force) in cx {
+                    let dist = e.iter().zip(empr).filter(|(a, b)| a != b).count();
+                    if dist <= 12 {
+                        if let Some((bf, _)) = best {
+                            if *force > bf { best = Some((*force, suiv)); }
+                        } else {
+                            best = Some((*force, suiv));
+                        }
+                    }
+                }
+                best.map(|(_, s)| s.clone())
+            };
 
-            println!("👁️  Veille prédictive + habituation — {}s, capture {}x{}", secondes, veille_w, h);
+            println!("🧠  Cerveau complet — {}s, capture {}x{} (prédiction + habituation + anticipation + deltas)", secondes, veille_w, h);
             while debut.elapsed().as_secs() < secondes {
                 tours += 1;
                 let png = cap.capture_bytes(veille_w, h)?;
+                let empr = fingerprint(&png)?;
+
+                // 1) ANTICIPATION CYCLIQUE : le cortex prédit cette frame ?
+                let predite = predire(&empr, &cortex);
+                if let Some(pred) = &predite {
+                    let dist = pred.iter().zip(&empr).filter(|(a, b)| a != b).count();
+                    if dist <= 12 {
+                        anticipations += 1;
+                        println!("   [t{}] ⚡ ANTICIPÉ (cycle connu, 0 capture d'analyse) | {}",
+                                 tours, chercher_familier(&empr, &hippocampe).unwrap_or_else(|| "cycle".to_string()));
+                        prev = Some(png);
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        continue;
+                    }
+                }
+
+                // 2) DIFF : le monde a-t-il changé ?
                 if let Some(prev_bytes) = &prev {
                     match analyse::diff_bbox(prev_bytes, &png, 30)? {
                         None => {
-                            // Immobile : ni diff, ni VLM — économie totale
-                            let empr = fingerprint(&png)?;
                             if let Some(reponse) = chercher_familier(&empr, &hippocampe) {
                                 habitudes += 1;
                                 println!("   [t{}] immobile + familier → habituation (0 VLM) | {}", tours, reponse);
@@ -797,47 +859,99 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         Some((x0, y0, x1, y1, pct)) => {
-                            // Marge autour du bbox (contexte visuel)
                             let m = 30u32;
                             let cx0 = x0.saturating_sub(m);
                             let cy0 = y0.saturating_sub(m);
                             let cx1 = (x1 + m).min(veille_w);
                             let cy1 = (y1 + m).min(h);
-                            if pct < 0.05 {
-                                println!("   [t{}] micro-changement ({:.3}%) ignoré (inhibition)", tours, pct);
-                                // Habituation perceptive : l'écran est "familier"
-                                let empr = fingerprint(&png)?;
+                            if pct < seuil_inhibition {
+                                micros_vus += 1;
+                                println!("   [t{}] micro-changement ({:.3}%) ignoré (inhibition {:.2}%)", tours, pct, seuil_inhibition);
                                 if let Some(reponse) = chercher_familier(&empr, &hippocampe) {
                                     habitudes += 1;
                                     println!("   [t{}] familier → réutilise la réponse (0 VLM) | {}", tours, reponse);
                                 }
                             } else {
-                                // VLM sur la zone CHANGÉE seulement (predictive coding)
-                                let crop = analyse::crop_bytes_png(&png, cx0, cy0, cx1, cy1, 1)?;
-                                let t0 = std::time::Instant::now();
-                                let reponse = analyze_image(&crop, &question)?;
-                                analyses += 1;
-                                // Mémorise dans l'hippocampe (l'écran devient familier)
-                                let empr = fingerprint(&png)?;
-                                hippocampe.push((empr, reponse.clone()));
-                                println!("   [t{}] CHANGEMENT {:.2}% bbox=({},{})-({},{}) → {:.2}s | {}", tours, pct, cx0, cy0, cx1, cy1, t0.elapsed().as_secs_f64(), reponse);
+                                // 3) VOCABULAIRE DE DELTAS : ce changement a-t-il
+                                // déjà été vu et compris ?
+                                let empr_delta = fingerprint(&png)?;
+                                if let Some(reponse) = chercher_delta(&empr_delta, &vocabulaire) {
+                                    deltas_connus += 1;
+                                    println!("   [t{}] CHANGEMENT {:.2}% CONNU (vocabulaire deltas, 0 VLM) | {}", tours, pct, reponse);
+                                } else {
+                                    // VLM sur la zone CHANGÉE (predictive coding)
+                                    let crop = analyse::crop_bytes_png(&png, cx0, cy0, cx1, cy1, 1)?;
+                                    let t0 = std::time::Instant::now();
+                                    let reponse = analyze_image(&crop, &question)?;
+                                    analyses += 1;
+                                    reels_vus += 1;
+                                    // Apprend : la frame courante devient familière
+                                    hippocampe.push((empr.clone(), reponse.clone()));
+                                    // Apprend le DELTA (rétine → vocabulaire)
+                                    vocabulaire.push((empr_delta, reponse.clone()));
+                                    println!("   [t{}] CHANGEMENT {:.2}% bbox=({},{})-({},{}) → {:.2}s | {}", tours, pct, cx0, cy0, cx1, cy1, t0.elapsed().as_secs_f64(), reponse);
+                                }
                             }
                         }
                     }
                 } else {
-                    // Première frame : analyse complète (la prédiction initiale)
                     let t0 = std::time::Instant::now();
                     let reponse = analyze_image(&png, &question)?;
                     analyses += 1;
-                    let empr = fingerprint(&png)?;
-                    hippocampe.push((empr, reponse.clone()));
+                    reels_vus += 1;
+                    hippocampe.push((empr.clone(), reponse.clone()));
                     println!("   [t{}] état initial → {:.2}s | {}", tours, t0.elapsed().as_secs_f64(), reponse);
                 }
+
+                // 4) APPRENTISSAGE DU CYCLE (cortex prédictif) : l'ancienne
+                // empreinte (prev) a mené à la nouvelle (empr). Renforce la
+                // transition — c'est comme ça que le cerveau apprend A→B.
+                if let Some(prev_bytes) = &prev {
+                    let empr_prev = fingerprint(prev_bytes)?;
+                    let mut trouve = false;
+                    for (e, suiv, force) in cortex.iter_mut() {
+                        let d = e.iter().zip(&empr_prev).filter(|(a, b)| a != b).count();
+                        if d <= 12 {
+                            // Transition déjà connue → renforce
+                            let d2 = suiv.iter().zip(&empr).filter(|(a, b)| a != b).count();
+                            if d2 <= 12 {
+                                *force = (*force + 1).min(100);
+                            } else {
+                                *force = force.saturating_sub(1);
+                            }
+                            trouve = true;
+                        }
+                    }
+                    if !trouve {
+                        cortex.push((empr_prev, empr.clone(), 1));
+                    }
+                    // Limite la taille du cortex (neurogenèse : garde les forts)
+                    if cortex.len() > 50 {
+                        cortex.sort_by_key(|(_, _, f)| std::cmp::Reverse(*f));
+                        cortex.truncate(50);
+                    }
+                }
+
+                // 5) NEUROGENÈSE : ajuste le seuil d'inhibition selon le
+                // contexte (si beaucoup de micros, l'écran est animé → on
+                // inhibe plus ; si beaucoup de réels, l'écran est actif → on
+                // inhibe moins pour ne rien manquer)
+                if micros_vus + reels_vus >= 3 {
+                    let ratio_micros = micros_vus as f64 / (micros_vus + reels_vus) as f64;
+                    if ratio_micros > 0.6 {
+                        seuil_inhibition = (seuil_inhibition * 1.5).min(0.5); // écran animé
+                    } else if ratio_micros < 0.3 {
+                        seuil_inhibition = (seuil_inhibition * 0.8).max(0.02); // écran actif
+                    }
+                    micros_vus = 0;
+                    reels_vus = 0;
+                }
+
                 prev = Some(png);
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
-            println!("⏱️  Veille terminée : {} tours, {} analyses VLM, {} habituation (réponses réutilisées), {} économisées",
-                tours, analyses, habitudes, tours.saturating_sub(analyses + habitudes));
+            println!("⏱️  Cerveau terminé : {} tours | {} analyses VLM | {} habituation | {} anticipations ⚡ | {} deltas connus | seuil inhibition final {:.2}%",
+                tours, analyses, habitudes, anticipations, deltas_connus, seuil_inhibition);
         }
         "--ocr" => {
             let cap = Capteur::new()?;
@@ -2006,6 +2120,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "travail" => {
                     let index = palais::charger_index()?;
                     palais::afficher_travail(&index)?;
+                }
+                // Sommeil du palais (consolidation ADN) : transforme les
+                // captures PNG (~1 Mo) en empreintes perceptives (2 Ko) +
+                // réponses VLM — le palais devient ~500× plus léger.
+                "sommeil" => {
+                    palais::sommeil()?;
                 }
                 "visiter" => {
                     palais::visiter()?;

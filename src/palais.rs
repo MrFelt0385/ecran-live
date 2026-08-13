@@ -261,6 +261,79 @@ pub fn afficher_travail(index: &PalaisIndex) -> Result<(), String> {
     Ok(())
 }
 
+/// SOMMEIL DU PALAIS (consolidation ADN, biomimétique) : pendant l'inactivité,
+/// le cerveau rejoue les souvenirs pour les consolider en mémoire compacte
+/// (hippocampe → cortex). Ici : chaque capture PNG (~1 Mo) est remplacée par
+/// son empreinte perceptive (~2 Ko) + le nom → le palais devient ~500× plus
+/// léger, chargement instantané, RAM quasi nulle.
+pub fn sommeil() -> Result<(), String> {
+    let r = racine()?;
+    let mut index = PalaisIndex::charger()?;
+    let mut compactes = 0u64;
+    let mut octets_avant: u64 = 0;
+    let mut octets_apres: u64 = 0;
+
+    // Crée le dossier consolidé (l'ADN compacté)
+    let consolide = r.join("consolide");
+    std::fs::create_dir_all(&consolide).map_err(|e| format!("création consolide : {}", e))?;
+
+    for (nom_piece, data) in index.cases.iter_mut() {
+        let dir = r.join(nom_piece);
+        let mut nouvelles_captures: Vec<CaptureEntry> = Vec::new();
+        for cap in &data.captures {
+            let src = dir.join(&cap.fichier);
+            let taille = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
+            octets_avant += taille;
+            // Empreinte perceptive = la "séquence génétique" du souvenir
+            let bytes = match std::fs::read(&src) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let empr = match empreinte_from_bytes(&bytes) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let dest = consolide.join(format!("{}_{}.fpt", nom_piece, &cap.ts));
+            std::fs::write(&dest, &empr).map_err(|e| format!("écriture empreinte : {}", e))?;
+            octets_apres += empr.len() as u64;
+            nouvelles_captures.push(CaptureEntry {
+                fichier: format!("{}_{}.fpt", nom_piece, &cap.ts),
+                ts: cap.ts.clone(),
+                nom: cap.nom.clone(),
+            });
+            compactes += 1;
+        }
+        data.captures = nouvelles_captures;
+    }
+
+    index.sauver()?;
+    println!("💤  SOMMEIL DU PALAIS terminé — {} souvenir(s) consolidé(s) :", compactes);
+    println!("    octets avant : {} ({:.1} Mo)", octets_avant, octets_avant as f64 / 1e6);
+    println!("    octets après : {} ({:.1} Ko) — ratio {:.0}× plus léger", octets_apres, octets_apres as f64 / 1e3,
+        if octets_apres > 0 { octets_avant as f64 / octets_apres as f64 } else { 0.0 });
+    println!("    L'index pointe maintenant vers des empreintes (~2 Ko) au lieu des PNG.");
+    Ok(())
+}
+
+/// Empreinte perceptive d'une image en mémoire (64x36 luminance) — réutilise
+/// le même principe que fingerprint() mais sans dépendre de main.rs.
+fn empreinte_from_bytes(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(png_bytes).map_err(|e| format!("image: {e}"))?;
+    let luma = img.to_luma8();
+    let (iw, ih) = luma.dimensions();
+    // Réduit à 64x36
+    let (rw, rh) = (64u32, 36u32);
+    let mut empr = Vec::with_capacity((rw * rh) as usize);
+    for y in 0..rh {
+        for x in 0..rw {
+            let sx = (x * iw / rw).min(iw - 1);
+            let sy = (y * ih / rh).min(ih - 1);
+            empr.push(luma.get_pixel(sx, sy)[0]);
+        }
+    }
+    Ok(empr)
+}
+
 /// Liste toutes les pièces non vides (vue d'ensemble du palais).
 pub fn visiter() -> Result<(), String> {
     let index = PalaisIndex::charger()?;
