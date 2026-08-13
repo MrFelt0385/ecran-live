@@ -58,18 +58,15 @@ souris, aucun événement HID, aucune warp. C'est le même mécanisme que cua-dr
 └──────────────────────────────────────────────────────────┘
 ```
 
-## 🎯 La boucle « bataille navale » (entraînement au clic)
+## 🎯 Démonstration : clic sur une cible mobile
 
-Un exercice d'entraînement : un bouton jaune « CLIQUE » se repositionne aléatoirement
-à chaque clic réussi, jusqu'à 1000 clics. La boucle complète :
+Le cycle complet qui valide la chaîne yeux → cible → tir → vérification :
 
-1. **Yeux** : capture + analyse pixel → localiser le massif jaune (0.36s)
-2. **Cible** : lecture AX → identifier l'élément `AXStaticText 'CLIQUE'`
+1. **Yeux** : capture + analyse pixel → localiser la cible (0.36s)
+2. **Cible** : lecture AX → identifier l'élément interactif (rôle + label + bounds)
 3. **Tir** : `AXPress` sur l'élément → clic, **curseur système immobile**
-4. **Vérification** : capture → le bouton a bougé ? le compteur a monté ?
+4. **Vérification** : capture → la cible a-t-elle réagi (diff pixel) ?
 5. **Impact visible** : croix rose à la position du tir pendant 6s (feedback visuel)
-
-Résultat : **9/1000 clics réussis en série, curseur intact à chaque tir**.
 
 ---
 

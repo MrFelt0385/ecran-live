@@ -210,6 +210,53 @@ clic pixel ne fonctionnent de façon fiable pour mettre le focus + écrire.
 
 ---
 
+## Leçon 11 : AXPress par élément = le clic qui ne touche JAMAIS au curseur
+
+**Le problème** : tout clic synthétique sur macOS a un défaut pour les apps
+WebKit (Safari) :
+
+| Méthode | Clic arrive ? | Curseur utilisateur bouge ? |
+|---|---|---|
+| `CGEventPost` tap Session | ✅ | ❌ bouge (interdit) |
+| `CGEvent.postToPid` (public) | ❌ filtré par WebKit | ✅ |
+| `SLEventPostToPid` (SkyLight) | ❌ filtré par Safari | ✅ |
+| warp + tap + restore | ✅ | ❌ mouvement visible |
+| **AXPress par élément** | ✅ 100 % | ✅ jamais touché |
+
+**Pourquoi post_to_pid est filtré** : le renderer WebContent de Safari filtre
+silencieusement les événements PID-routés (*"your click lands in the outer
+window process, then vanishes"* — blog cua-driver). Même `SLEventPostToPid`
+(auth=false pour la souris) n'y échappe pas sur Safari, contrairement à Chrome.
+
+**Pourquoi le tap déplace le curseur** : `CGEventPost` au tap Session/HID met à
+jour la position du pointeur système vers la position de l'événement — un side
+effect de WindowServer documenté. `CGAssociateMouseAndMouseCursorPosition(false)`
+n'empêche PAS ce comportement sur macOS récent (testé).
+
+**La solution — AXPress par élément** : lire l'arbre d'accessibilité de l'app,
+identifier l'élément (rôle + label + bounds), puis déclencher `AXPress`
+directement sur l'élément. Aucune coordonnée souris, aucun événement HID, aucun
+warp. C'est le mécanisme de cua-driver (computer use) :
+
+> *"element-indexed clicks fire the underlying AX action directly, work on
+> hidden targets, and don't involve coordinates."*
+
+**Preuve** : série de clics sur une cible mobile (Safari) — compteur qui monte
+à chaque tir, bouton qui se repositionne, **curseur système parfaitement
+immobile à chaque tir** (vérifié par `--mousepos` avant/après).
+
+**Comment faire** (deux approches) :
+1. **Pont cua-driver** (si votre binaire n'a pas la permission AX) :
+   `get_window_state` → `element_index` → `click` avec `snapshot_id` + scope window
+2. **AXPress natif** (si votre binaire a Accessibilité) :
+   `AXUIElementCopyElementAtPosition` ou parcours d'arbre → `AXUIElementPerformAction(kAXPressAction)`
+
+**Attention** : `AXUIElementCopyElementAtPosition` retourne parfois la webArea
+conteneur au lieu de l'élément profond sur Safari — préférer le parcours de
+l'arbre par label (title/description/value) quand la cible a un texte connu.
+
+---
+
 ## Règle d'or finale
 
 **ŒIL → MAIN → VÉRIFICATION → APPRENTISSAGE** :

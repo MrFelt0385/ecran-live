@@ -33,17 +33,18 @@ cp target/release/ecran-live /Applications/ecran-live
 cd ~/Projects/mlxcel
 cargo build --release --features metal,accelerate
 
-# Modèle 8-bit (STABLE — recommandé)
-mkdir -p models/LFM2.5-VL-1.6B-8bit && cd models/LFM2.5-VL-1.6B-8bit
-# Téléchargez depuis https://huggingface.co/mlx-community/LFM2.5-VL-1.6B-8bit :
+# Modèle 3B-4bit (recommandé — grounding + screen understanding, 2.2 GB)
+mkdir -p models/LFM2.5-VL-3B-MLX-4bit && cd models/LFM2.5-VL-3B-MLX-4bit
+# Téléchargez depuis https://huggingface.co/LiquidAI/LFM2.5-VL-3B-MLX-4bit :
 #   model.safetensors, config.json, generation_config.json,
 #   processor_config.json, tokenizer.json, chat_template.jinja
 
 # Test manuel du serveur
 cd ~/Projects/mlxcel
-./target/release/mlxcel-server -m models/LFM2.5-VL-1.6B-8bit --port 8085 \
-  --host 127.0.0.1 --parallel 4 --enable-vlm-prefix-cache
+./target/release/mlxcel-server -m models/LFM2.5-VL-3B-MLX-4bit --port 8085 \
+  --host 127.0.0.1 --parallel 1 --enable-vlm-prefix-cache
 # Vérifiez : curl -s http://127.0.0.1:8085/v1/models
+# Alternative plus légère : LFM2.5-VL-1.6B-4bit (1.4 GB, 1.7 Go RAM)
 ```
 
 ## 3. LaunchAgent serveur (démarrage auto au login)
@@ -61,7 +62,7 @@ cd ~/Projects/mlxcel
     <array>
         <string>/Users/francoisbernabe/Projects/mlxcel/target/release/mlxcel-server</string>
         <string>-m</string>
-        <string>/Users/francoisbernabe/Projects/mlxcel/models/LFM2.5-VL-1.6B-8bit</string>
+        <string>/Users/francoisbernabe/Projects/mlxcel/models/LFM2.5-VL-3B-MLX-4bit</string>
         <string>--port</string>
         <string>8085</string>
         <string>--host</string>
@@ -146,7 +147,7 @@ cua-driver permissions status
 ```bash
 # 1. Serveur répond
 curl -s http://127.0.0.1:8085/v1/models | head -c 80
-# {"object":"list","data":[{"id":"LFM2.5-VL-1.6B-8bit",...
+# {"object":"list","data":[{"id":"LFM2.5-VL-3B-MLX-4bit",...
 
 # 2. Capture fonctionne
 ecran-live --ocr 1600 2>&1 | head -3
@@ -156,10 +157,9 @@ ecran-live --ocr 1600 2>&1 | head -3
 ecran-live --locate 1600 "Finder" 2>&1 | head -2
 # 🎯 TROUVÉ « Finder » ... [score 0/2]
 
-# 4. Pont AX fonctionne (si cua-driver installé)
-ecran-live --axclick Safari "Description" 2>&1 | tail -2
-# 🔌 PONT cua: élément [...] « Description »
-# ✅ Clic cua effectué
+# 4. Clic AXPress curseur-intact (si votre binaire a Accessibilité)
+ecran-live --clic-ax-label 653 CLIQUE 2>&1 | tail -2
+# 🎯 AXPress réussi sur « CLIQUE »
 ```
 
 ---
@@ -171,6 +171,6 @@ ecran-live --axclick Safari "Description" 2>&1 | tail -2
 | Capture noire | Screen Recording manquante | Réglages → Confidentialité → Capture d'écran |
 | `Ax(-25211)` | Accessibilité manquante | Réglages → Confidentialité → Accessibilité |
 | Serveur muet (curl timeout) | OOM / mort-vivant | `launchctl kickstart -k gui/501/com.hermes.mlxcel-vision` + watchdog |
-| Clic au mauvais endroit | Coordonnées mélangées | `--clickxy` = écran réel ; OCR = capture 1600 (×1.6) ; cua = element_index |
+| Clic au mauvais endroit | Coordonnées mélangées | `--clickxy` = écran réel ; OCR = capture 1600 (×2.4) ; AXPress = par élément (aucune coordonnée) |
 | `Missing required integer field: window_id` | Pont cua sans window_id | `get_window_state` exige pid + window_id |
 | Clic intercepté par un modal | Overlay ouvert | `--ocr` pour vérifier, Escape pour fermer |
