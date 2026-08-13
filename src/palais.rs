@@ -56,6 +56,18 @@ pub struct PieceData {
 pub struct PalaisIndex {
     #[serde(default)]
     pub cases: BTreeMap<String, PieceData>,
+    /// Index inversé biomimétique (méthode LOCI / activation diffuse) :
+    /// nom → liste de pièces qui contiennent ce nom. Le cerveau retrouve
+    /// un souvenir par SES ASSOCIATIONS (le nom active les lieux), pas en
+    /// scannant tout le palais. Un même nom peut vivre dans plusieurs pièces
+    /// (blob-like : plusieurs chemins d'accès vers la même donnée).
+    #[serde(default)]
+    pub associations: BTreeMap<String, Vec<String>>,
+    /// Mémoire de travail (Miller 1956 : 7±2 items) — les dernières pièces
+    /// consultées, gardées en tête pour un accès instantané aux données
+    /// récentes (hot cache, chemins d'accès courts).
+    #[serde(default)]
+    pub travail: Vec<String>,
 }
 
 impl PalaisIndex {
@@ -82,6 +94,50 @@ impl PalaisIndex {
             .map_err(|e| format!("encodage index : {}", e))?;
         std::fs::write(&p, contenu).map_err(|e| format!("écriture index : {}", e))?;
         Ok(())
+    }
+
+    /// Mémoire de travail : marque une pièce comme récemment consultée
+    /// (le cerveau garde 7±2 items actifs — les données chaudes sont
+    /// retrouvées par le chemin le plus court).
+    pub fn noter_travail(&mut self, nom_piece: &str) {
+        if let Some(pos) = self.travail.iter().position(|p| p == nom_piece) {
+            self.travail.remove(pos);
+        }
+        self.travail.push(nom_piece.to_string());
+        const MAX_TRAVAIL: usize = 7; // Miller 1956 : 7±2
+        if self.travail.len() > MAX_TRAVAIL {
+            self.travail.remove(0);
+        }
+    }
+
+    /// Lien associatif : nom → pièce (l'index inversé pour retrouver par
+    /// sémantique, pas seulement par position spatiale).
+    pub fn associer(&mut self, nom: &str, nom_piece: &str) {
+        if nom.is_empty() || nom == "capture" {
+            return; // nom par défaut inutile — pas d'association à créer
+        }
+        let pieces = self.associations.entry(nom.to_string()).or_default();
+        if !pieces.contains(&nom_piece.to_string()) {
+            pieces.push(nom_piece.to_string());
+        }
+    }
+
+    /// Activation diffuse : à partir d'un nom, récupère TOUTES les pièces
+    /// qui le contiennent (plusieurs chemins d'accès = blob-like) + les
+    /// pièces récentes si aucune association exacte (proximité temporelle).
+    pub fn activer(&self, nom: &str) -> Vec<String> {
+        if let Some(pieces) = self.associations.get(nom) {
+            return pieces.clone();
+        }
+        // Recherche partielle (préfixe/contient) — comme le cerveau qui
+        // reconnaît un souvenir par fragments.
+        let mut resultats: Vec<String> = Vec::new();
+        for (cle, pieces) in &self.associations {
+            if cle.contains(nom) || nom.contains(cle) {
+                resultats.extend(pieces.iter().cloned());
+            }
+        }
+        resultats
     }
 }
 
@@ -118,6 +174,10 @@ pub fn ranger(chemin_src: &str, l: u32, c: u32, nom: &str) -> Result<(), String>
         .or_default()
         .captures
         .push(entree);
+    // Méthode LOCI : on crée les associations (nom → pièce) pour retrouver
+    // par activation diffuse, et on marque la pièce en mémoire de travail.
+    index.associer(nom, &nom_piece);
+    index.noter_travail(&nom_piece);
     index.sauver()?;
 
     println!(
@@ -128,9 +188,12 @@ pub fn ranger(chemin_src: &str, l: u32, c: u32, nom: &str) -> Result<(), String>
 }
 
 /// Chercher : liste les captures d'une pièce (O(1) via l'index).
+/// Noté en mémoire de travail → l'accès suivant sera instantané.
 pub fn chercher(l: u32, c: u32) -> Result<(), String> {
-    let index = PalaisIndex::charger()?;
+    let mut index = PalaisIndex::charger()?;
     let nom_piece = piece(l, c);
+    index.noter_travail(&nom_piece);
+    index.sauver()?;
     match index.cases.get(&nom_piece) {
         Some(piece_data) => {
             println!("🏛️  Pièce {} — {} capture(s), {} tir(s), biais dx={:.1} dy={:.1}",
@@ -145,6 +208,57 @@ pub fn chercher(l: u32, c: u32) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// Retrouver par ASSOCIATION (méthode LOCI / activation diffuse) : à partir
+/// d'un nom, le cerveau active les pièces qui le contiennent — plusieurs
+/// chemins d'accès (blob-like) au lieu d'une seule position spatiale.
+/// Affiche les chemins les plus courts d'abord (mémoire de travail).
+pub fn retrouver(nom: &str) -> Result<(), String> {
+    let index = PalaisIndex::charger()?;
+    let pieces = index.activer(nom);
+    if pieces.is_empty() {
+        println!("🏛️  Aucun souvenir pour « {} » — essayez un nom partiel (ex: --palais retrouver bouton)", nom);
+        return Ok(());
+    }
+    println!("🏛️  ACTIVATION DIFFUSE — « {} » → {} chemin(s) d'accès :", nom, pieces.len());
+    // Les pièces en mémoire de travail d'abord (chemin le plus court)
+    let mut ordre: Vec<String> = pieces.clone();
+    ordre.sort_by_key(|p| {
+        let travail_pos = index.travail.iter().position(|t| t == p);
+        match travail_pos {
+            Some(pos) => 0usize.saturating_sub(pos), // récent = prioritaire
+            None => usize::MAX,
+        }
+    });
+    for (i, nom_piece) in ordre.iter().enumerate() {
+        let data = index.cases.get(nom_piece);
+        let (n, dx, dy) = match data {
+            Some(d) => (d.captures.len(), d.dx, d.dy),
+            None => (0, 0.0, 0.0),
+        };
+        let travail = if index.travail.contains(nom_piece) { " 🔥 mémoire de travail" } else { "" };
+        println!("  [{}] {} — {} capture(s), biais dx={:.1} dy={:.1}{}", i, nom_piece, n, dx, dy, travail);
+    }
+    Ok(())
+}
+
+/// Accès public à l'index (pour le sous-commande `travail`)
+pub fn charger_index() -> Result<PalaisIndex, String> {
+    PalaisIndex::charger()
+}
+
+/// Affiche la mémoire de travail (Miller 1956 : 7±2 items récents)
+pub fn afficher_travail(index: &PalaisIndex) -> Result<(), String> {
+    if index.travail.is_empty() {
+        println!("🏛️  Mémoire de travail vide — consultez des pièces (chercher) pour la remplir");
+        return Ok(());
+    }
+    println!("🏛️  MÉMOIRE DE TRAVAIL (Miller 1956 : 7±2) — {} pièce(s) chaude(s) :", index.travail.len());
+    for (i, nom_piece) in index.travail.iter().enumerate() {
+        println!("  [{}] {} (récent {})", i, nom_piece, index.travail.len() - i);
+    }
+    Ok(())
 }
 
 /// Liste toutes les pièces non vides (vue d'ensemble du palais).

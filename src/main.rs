@@ -1995,6 +1995,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let c: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
                     palais::chercher(l, c)?;
                 }
+                "retrouver" => {
+                    let nom = args.get(2).cloned().unwrap_or_default();
+                    if nom.is_empty() {
+                        println!("Usage: ecran-live --palais retrouver <nom>");
+                        return Ok(());
+                    }
+                    palais::retrouver(&nom)?;
+                }
+                "travail" => {
+                    let index = palais::charger_index()?;
+                    palais::afficher_travail(&index)?;
+                }
                 "visiter" => {
                     palais::visiter()?;
                 }
@@ -2028,6 +2040,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                          Usage:\n\
                          \x20 ecran-live --palais ranger <img> <l> <c> [nom]   — range une capture\n\
                          \x20 ecran-live --palais chercher <l> <c>              — liste la pièce (O(1))\n\
+                         \x20 ecran-live --palais retrouver <nom>            — activation diffuse (LOCI)\n\
+                         \x20 ecran-live --palais travail                    — mémoire de travail 7±2\n\
                          \x20 ecran-live --palais visiter                       — vue d'ensemble\n\
                          \x20 ecran-live --palais tir <l> <c> <vx> <vy> <tx> <ty> — biais par zone\n\
                          \x20 ecran-live --palais purge <l> <c> [--garder N]    — purge (défaut garder 3)\n\
