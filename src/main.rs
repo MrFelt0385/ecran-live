@@ -668,6 +668,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             uizoomer(&global_png)?;
         }
+        // ecran-live --scan [largeur] [top_zones] [question]
+        //   SCAN RAPIDE — la boucle sous 1s : capture → saillance pixels (0.02s)
+        //   → crops ciblés → VLM sur les zones (pas l'écran entier).
+        //   Le vision tower sur l'écran complet coûte ~6s (157 tokens) vs ~0.9s
+        //   sur un crop (90 tokens) — cibler les zones divise par 5 le temps.
+        //   Contrainte mlxcel --parallel 1 : les analyses VLM se sérialisent,
+        //   donc on limite à top_zones=2 par défaut (2 × ~0.9s).
+        "--scan" => {
+            let cap = Capteur::new()?;
+            let scan_w: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1600);
+            let top: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2);
+            let question = args.get(3).cloned()
+                .unwrap_or_else(|| "Décris précisément ce que tu vois dans cette zone.".to_string());
+            let h = (scan_w as f64 * cap.ratio).round() as u32;
+            let t0 = std::time::Instant::now();
+            let png = cap.capture_bytes(scan_w, h)?;
+            println!("📸 Capture {}x{} en {:.2}s", scan_w, h, t0.elapsed().as_secs_f64());
+
+            // 1. Saillance pixel native (0.02s) — les yeux
+            let t1 = std::time::Instant::now();
+            let zones = saliency(&png, 8, 5, top)?;
+            println!("🎯 {} zone(s) saillante(s) en {:.3}s", zones.len(), t1.elapsed().as_secs_f64());
+            for (i, z) in zones.iter().enumerate() {
+                println!("   zone {}/{} : x={}, y={}, {}x{}", i + 1, zones.len(), z.x, z.y, z.w, z.h);
+            }
+
+            // 2. VLM sur les crops (ciblés, pas l'écran entier)
+            let t2 = std::time::Instant::now();
+            zoom_zones(&png, &zones)?;
+            println!("⏱️  Scan complet en {:.2}s (pixels {:.2}s + VLM zones {:.2}s)",
+                t0.elapsed().as_secs_f64(),
+                t1.elapsed().as_secs_f64(),
+                t2.elapsed().as_secs_f64());
+        }
         "--ocr" => {
             let cap = Capteur::new()?;
             println!("Mode OCR : extraction des textes + bounding boxes (coordinate priming)");
@@ -2319,6 +2353,15 @@ fn levenshtein(a: &str, b: &str) -> usize {
 /// Rust + MLX C++ natif — ~4-10x plus rapide que mistralrs).
 /// Retourne le texte généré.
 fn analyze_image(png_bytes: &[u8], question: &str) -> Result<String, String> {
+    analyze_image_mt(png_bytes, question, 24)
+}
+
+/// Version avec max_tokens contrôlable. Le VLM génère à ~30 tok/s : une
+/// réponse de 40 tokens coûte ~1.3s de génération (vs 100 tokens = ~3.3s).
+/// Les prompts qui exigent une réponse courte (oui/non, un nombre, un mot)
+/// tombent sous la seconde. Les descriptions détaillées passent par
+/// analyze_image_mt(png, q, 300).
+fn analyze_image_mt(png_bytes: &[u8], question: &str, max_tokens: u32) -> Result<String, String> {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes);
     let payload = serde_json::json!({
@@ -2330,7 +2373,7 @@ fn analyze_image(png_bytes: &[u8], question: &str) -> Result<String, String> {
                 {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{}", b64)}}
             ]
         }],
-        "max_tokens": 100,
+        "max_tokens": max_tokens,
         "temperature": 0
     });
     let resp = ureq::post("http://localhost:8085/v1/chat/completions")
@@ -2523,10 +2566,30 @@ fn zoom_zones(png_bytes: &[u8], zones: &[SalientZone]) -> Result<(), Box<dyn std
         let hh = (z.h + 2 * mh).min(ih - y);
         let crop = img.crop(x, y, w, hh);
         let mut buf = Vec::new();
+        // ══ RÉDUCTION DU CROP AVANT VLM (perf 13/08) ══
+        // Le vision tower coûte proportionnellement aux patches d'image :
+        // crop 240x216 = ~9s (130 tokens), réduit 256px = 2.7s (86 tokens),
+        // réduit 128px = sous la seconde (~90 tokens max, mesuré 0.89s).
+        // On downscale chaque crop à max 128px de large AVANT l'envoi VLM.
+        let reduced: image::DynamicImage = {
+            let (cw, ch) = crop.dimensions();
+            if cw > 128 {
+                let scale = 128.0 / cw as f64;
+                let rgb = crop.to_rgb8();
+                image::DynamicImage::ImageRgb8(image::imageops::resize(
+                    &rgb,
+                    128,
+                    ((ch as f64) * scale).max(1.0) as u32,
+                    image::imageops::FilterType::Triangle,
+                ))
+            } else {
+                crop
+            }
+        };
         image::codecs::png::PngEncoder::new(&mut std::io::Cursor::new(&mut buf)).write_image(
-            crop.as_bytes(),
-            crop.width(),
-            crop.height(),
+            reduced.as_bytes(),
+            reduced.width(),
+            reduced.height(),
             image::ExtendedColorType::Rgb8,
         )?;
         crops.push((x, y, w, hh, buf));

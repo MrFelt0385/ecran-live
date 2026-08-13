@@ -123,17 +123,18 @@ interactif par son rôle + label + bounds, puis on déclenche `AXPress`
 | Composant | Valeur |
 |---|---|
 | **Analyse pixel native** | **0.023s** |
-| **VLM 512px à chaud (3B-4bit)** | **1.9s** |
-| **VLM sur crop ciblé (120×70)** | **1.1s** |
-| **VLM sur crop ciblé + max 256** | **0.89s** ⚠️ texte dégradé |
-| Cycle vision complet (capture→analyse→compréhension) | **~2.3s** |
+| **VLM 512px à chaud (3B-4bit, max_tokens 24)** | **~1s** |
+| **VLM sur crop ciblé (120×70)** | **1.0s** |
+| **VLM sur image complexe (crop 128px)** | **1.25s** |
+| Cycle vision complet (capture→analyse→compréhension) | **~1.3s** |
 | Footprint VLM 3B-4bit | **2.8 Go** (tient dans 8 Go) |
-| RAM système libre après chargement | **44-68 %** (seuil critique 11-13 %) |
+| RAM système libre après chargement | **44-69 %** (seuil critique 11-13 %) |
 
-> **Leçon performance** : analyser des **zones ciblées** (crop) plutôt que l'écran
-> complet divise le temps VLM par ~2 à finesse égale. C'est l'architecture
-> `--vlmzone` (crop + zoom 3×) : on scanne large en pixel natif (0.02s), on
-> zoome sur les zones d'intérêt, on ne VLMise que ce qui compte.
+> **Leçon performance (13/08)** : le VLM génère à ~30 tok/s. Limiter
+> `max_tokens` (24 par défaut) fait tomber la latence de 6s à ~1s sans perte
+> pour les réponses courtes (oui/non, nombre, mot). Analyser des **zones
+> ciblées** (crop) plutôt que l'écran entier divise encore le temps — le
+> pipeline `--scan` : pixels (0.02s) → crops réduits → VLM court = **~1.2s**. 
 
 ### Comparaison des modèles VLM
 
