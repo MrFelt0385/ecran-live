@@ -1151,6 +1151,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("⏱️  BLOB-ESPION TEST terminé : {} frames | {} requêtes VLM | {} suivis pixels | économie {} requêtes évitées",
                 frames.len(), analyses, suivis, suivis.saturating_sub(analyses));
         }
+        // ecran-live --contexte [largeur] [question] [x0 y0 x1 y1]
+        //   PRISE DE CONSCIENCE DU CONTEXTE GLOBAL (biomimétique 13/08) :
+        //   le cerveau maintient un MODÈLE MENTAL de la scène — il ne
+        //   re-regarde jamais tout, il ANCRE chaque regard dans ce qu'il
+        //   sait déjà. Testé : le VLM comprend bien mieux avec un cadre
+        //   (5.15s, décrit la zone) que sans (perdu, 1.87s).
+        //   Pipeline :
+        //   1. ANALYSE GLOBALE : écran réduit 512px → le VLM établit le
+        //      contexte (« c'est un éditeur ») — le MODÈLE MENTAL
+        //   2. ANALYSE LOCALE (si zone donnée) : crop de la zone + question
+        //      ENRICHIE du contexte → qualité fine ET fiable (le VLM sait
+        //      où il est, il ne perd plus le fil)
+        "--contexte" => {
+            let cap = Capteur::new()?;
+            let ctx_w: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1600);
+            let question = args.get(2).cloned()
+                .unwrap_or_else(|| "Décris précisément ce que tu vois à l'écran.".to_string());
+            // Zone optionnelle : x0 y0 x1 y1 (analyse locale enrichie)
+            let zx0: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let zy0: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let zx1: u32 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let zy1: u32 = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let a_zone = zx1 > 0 && zy1 > 0;
+            let h = (ctx_w as f64 * cap.ratio).round() as u32;
+            let png = cap.capture_bytes(ctx_w, h)?;
+
+            println!("🧠  CONTEXTE GLOBAL — capture {}x{}, établit le modèle mental", ctx_w, h);
+
+            // 1) ANALYSE GLOBALE : l'écran entier réduit (le cerveau regarde
+            // la pièce avant de regarder les détails)
+            let img = image::load_from_memory(&png)?;
+            let (w, ih) = img.dimensions();
+            // Réduit à 512px max (sweet spot VLM)
+            let scale = 512.0 / w.max(ih) as f64;
+            let nw = (w as f64 * scale).max(1.0) as u32;
+            let nh = (ih as f64 * scale).max(1.0) as u32;
+            let small = img.resize(nw, nh, image::imageops::FilterType::Triangle);
+            let mut buf = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut std::io::Cursor::new(&mut buf)).write_image(
+                &small.to_rgb8().into_raw(), nw, nh, image::ExtendedColorType::Rgb8)?;
+            let t0 = std::time::Instant::now();
+            let contexte = analyze_image(&buf, &question)?;
+            println!("   [global] écran {}x{} → {}x{} → {:.2}s", w, ih, nw, nh, t0.elapsed().as_secs_f64());
+            println!("   🧠 MODÈLE MENTAL : {}", contexte);
+
+            // 2) ANALYSE LOCALE ENRICHIE (si zone donnée)
+            if a_zone {
+                let crop = analyse::crop_bytes_png(&png, zx0, zy0, zx1, zy1, 1)?;
+                let t1 = std::time::Instant::now();
+                let locale = analyze_image_ctx(&crop, &question, &contexte)?;
+                println!("   [local] zone ({},{})-({},{}) avec contexte → {:.2}s", zx0, zy0, zx1, zy1, t1.elapsed().as_secs_f64());
+                println!("   🔍 ANALYSE LOCALE (enrichie) : {}", locale);
+            }
+            return Ok(());
+        }
         "--ocr" => {
             let cap = Capteur::new()?;
             println!("Mode OCR : extraction des textes + bounding boxes (coordinate priming)");
@@ -2825,6 +2880,17 @@ fn analyze_image(png_bytes: &[u8], question: &str) -> Result<String, String> {
     analyze_image_mt(png_bytes, question, 24)
 }
 
+/// Analyse avec CONTEXTE GLOBAL (modèle mental) : préfixe la question avec
+/// le résumé de l'écran établi par --contexte. Le VLM sait où il est →
+/// moins d'hallucinations, qualité fine et fiable (testé 13/08).
+fn analyze_image_ctx(png_bytes: &[u8], question: &str, contexte: &str) -> Result<String, String> {
+    if contexte.is_empty() {
+        return analyze_image_mt(png_bytes, question, 24);
+    }
+    let q = format!("Contexte global de l'écran : {}. Question : {}", contexte, question);
+    analyze_image_mt(png_bytes, &q, 24)
+}
+
 /// Version avec max_tokens contrôlable. Le VLM génère à ~30 tok/s : une
 /// réponse de 40 tokens coûte ~1.3s de génération (vs 100 tokens = ~3.3s).
 /// Les prompts qui exigent une réponse courte (oui/non, un nombre, un mot)
@@ -2834,7 +2900,7 @@ fn analyze_image_mt(png_bytes: &[u8], question: &str, max_tokens: u32) -> Result
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes);
     let payload = serde_json::json!({
-        "model": "LFM2.5-VL-3B-MLX-4bit",
+        "model": "LFM2.5-VL-3B-MLX-4bit-vq",
         "messages": [{
             "role": "user",
             "content": [
@@ -2865,7 +2931,7 @@ fn analyze_image_mt(png_bytes: &[u8], question: &str, max_tokens: u32) -> Result
 /// suivant coûte ~0.6s au lieu de ~2.2s (cached≈277/297, mesuré).
 fn analyze_conversation(messages: serde_json::Value) -> Result<String, String> {
     let payload = serde_json::json!({
-        "model": "LFM2.5-VL-3B-MLX-4bit",
+        "model": "LFM2.5-VL-3B-MLX-4bit-vq",
         "messages": messages,
         "max_tokens": 100,
         "temperature": 0
